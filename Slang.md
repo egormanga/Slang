@@ -18,19 +18,17 @@ char f(str x) {  # f() is of type char, x is of type str
 	return c
 }
 
-char g(str x) {  # g() is of type char, x is of type str
+auto g(str x) {  # g() is of type char, x is of type str
 	return x[0]  # retval is of type char
 }
 
 int h(int x) = x+1  # h() is of type int, x is of type int
 
-void main() {
-	print(h(n), \
+main {
+	stdio.println(h(n), \  # comment here too
 		f('123asd') + g('32') + 1)  #--> «123124 f»
-	print(q/z/2**96)  #--> «4294967296.0»
+	stdio.println(q/z/2**96)  #--> «4294967296.0»
 }
-
-main()
 ```
 
 ## Tokens
@@ -83,6 +81,7 @@ _Note: `*` after syntax unit means any number of them._
 * `<exprkeyword> [expr]` — `keywordexpr` (keyword expression)
 * `<typedef> <identifier> [= <value>]` — `vardef` (variable definition)
 * `<identifier> = <value>` — `assignment`
+* `<identifier>[, <identifier>]* = <value>` — `unpackassignment`
 * `<value>([<callargs> | <callkwargs> | <callargs>, <callkwargs>])` — `funccall` (function call)
 * `<expr>` — expr evaluation (only in REPL)
 * `if (<expr>) <block>` — `conditional`
@@ -106,7 +105,7 @@ _Note: `*` after syntax unit means any number of them._
 
 Non-empty sequence of alphanumeric characters plus underscore («_»), not starting with a digit character.
 
-Regex: `[_\w]+[_\w\d]*`
+Regex: `[_\w][_\w\d]*`
 
 ### Data types
 
@@ -133,6 +132,12 @@ _Note: `*` after syntax unit here means any number of them, `+` means at least o
 * `<<0<b | o | x>><digit+> | <digit+>.<digit*> | <digit*>.<digit+>>` — number
 * `<"<character*>" | '<character*>'>` — string
 
+### Literal structures
+
+* `[ <value>[, <value>]* ]` — list
+* `( [type] <value>[, [type] <value>]* )` — tuple
+* `{ <<key>: <value>>* }` — map
+
 ## Operators
 
 * `<operator> <operand>` — unary operators usage
@@ -143,7 +148,7 @@ _Note: `*` after syntax unit here means any number of them, `+` means at least o
 
 A set of pre-defined character operators:
 
-* `!$%&*+-:^~` — unary charset
+* `!+-~` — unary charset
 * `%&*+-/<=>^|` — binary charset
 * `==`, `**`, `//`, `<<`, `>>` — double-char binary operators
 
@@ -167,4 +172,4 @@ A set of pre-defined keyword operators:
 All character class checks are performed in current locale.
 
 ---
-_by Sdore, 2019_
+_by Sdore, 2020_

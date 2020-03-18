@@ -1,0 +1,288 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<language id="slang" name="Slang" version="2.0" _section="Script">
+	<metadata>
+		<property name="mimetypes">text/x-slang;application/x-slang</property>
+		<property name="globs">*.sl</property>
+		<property name="line-comment-start">#</property>
+		<property name="block-comment-start">#|</property>
+		<property name="block-comment-start">|#</property>
+	</metadata>
+
+	<styles>
+		<style id="comment"		name="Comment"			map-to="def:comment"/>
+		<style id="keyword"		name="Keyword"			map-to="def:keyword"/>
+		<style id="reserved"		name="Reserved Keyword"		map-to="def:reserved"/>
+		<style id="string"		name="String"			map-to="def:string"/>
+		<style id="multiline-string"	name="Multi-line String"	map-to="def:string"/>
+		<style id="character"		name="Character"		map-to="def:character"/>
+		<style id="escaped-char"	name="Escaped Character"	map-to="def:special-char"/>
+		<style id="boolean"		name="Boolean"			map-to="def:boolean"/>
+		<style id="floating-point"	name="Floating point number"	map-to="def:floating-point"/>
+		<style id="decimal"		name="Decimal number"		map-to="def:decimal"/>
+		<style id="base-n-integer"	name="Base-N number"		map-to="def:base-n-integer"/>
+		<style id="complex"		name="Complex number"		map-to="def:complex"/>
+		<style id="builtin-constant"	name="Builtin Constant"		map-to="def:special-constant"/>
+		<style id="builtin-object"	name="Builtin Object"		map-to="def:function"/>
+		<style id="builtin-type"	name="Builtin Type"		map-to="def:type"/>
+		<style id="function-name"	name="Function Name"		map-to="def:function"/>
+		<style id="class-name"		name="Class Name"		map-to="def:function"/>
+		<style id="decorator"		name="Decorator"		map-to="def:preprocessor"/>
+	</styles>
+
+	<definitions>
+		<define-regex id="identifier">[_\w][_\w\d]*</define-regex>
+		<define-regex id="number">[1-9][0-9]*</define-regex>
+
+		<define-regex id="identifier-path" extended="true">
+			(\%{identifier}\.)*\%{identifier}
+		</define-regex>
+		<define-regex id="relative-path" extended="true">
+			(\.*\%{identifier-path}|\.+)
+		</define-regex>
+
+		<context id="comment" style-ref="comment" end-at-line-end="true" class-disabled="no-spell-check" class="comment">
+			<start>#</start>
+			<include>
+				<context ref="def:in-line-comment"/>
+			</include>
+		</context>
+		<context id="multiline-comment" style-ref="comment" class-disabled="no-spell-check" class="comment">
+			<start>#\|</start>
+			<end>\|#</end>
+			<include>
+				<context ref="def:in-comment"/>
+			</include>
+		</context>
+		<context id="close-comment-outside-comment" style-ref="error">
+			<match>\|#(?!#\|)</match>
+		</context>
+
+		<context id="escaped-char" style-ref="escaped-char" extend-parent="true">
+			<match extended="true">
+				\\(								 # leading backslash
+				[\\'"abfnrtv]		 | # single escaped char
+				N\{[0-9A-Z\ -]+\} | # named unicode character
+				u[0-9A-Fa-f]{4}	 | # xxxx - character with 16-bit hex value xxxx
+				U[0-9A-Fa-f]{8}	 | # xxxxxxxx - character with 32-bit hex value xxxxxxxx
+				x[0-9A-Fa-f]{1,2} | # \xhh - character with hex value hh
+				[0-7]{1,3}					# \ooo - character with octal value ooo
+				)
+			</match>
+		</context>
+
+		<context id="multiline-double-quoted-string" style-ref="string" class="string" class-disabled="no-spell-check">
+			<start>"""</start>
+			<end>"""</end>
+			<include>
+				<context ref="escaped-char"/>
+			</include>
+		</context>
+
+		<context id="multiline-single-quoted-string" style-ref="multiline-string" class="string" class-disabled="no-spell-check">
+			<start>'''</start>
+			<end>'''</end>
+			<include>
+				<context ref="escaped-char"/>
+			</include>
+		</context>
+
+		<context id="double-quoted-string" style-ref="string" end-at-line-end="true" class="string" class-disabled="no-spell-check">
+			<start>"</start>
+			<end>"</end>
+			<include>
+				<context ref="escaped-char"/>
+				<context ref="def:line-continue"/>
+			</include>
+		</context>
+
+		<context id="single-quoted-string" style-ref="string" end-at-line-end="true" class="string" class-disabled="no-spell-check">
+			<start>'</start>
+			<end>'</end>
+			<include>
+				<context ref="escaped-char"/>
+				<context ref="def:line-continue"/>
+			</include>
+		</context>
+
+		<context id="char" style-ref="character" class="string" class-disabled="no-spell-check">
+			<match extended="true">'([^'])'</match>
+		</context>
+
+		<context id="boolean" style-ref="boolean">
+			<prefix>(?&lt;![\w\.])</prefix>
+			<keyword>false</keyword>
+			<keyword>true</keyword>
+		</context>
+
+		<define-regex id="float" extended="true">
+			( (\d+)?\.\d+ | \d+\. ) |
+			( (\d+|(\d+)?\.\d+|\d+\.)[eE][+-]?\d+ )
+		</define-regex>
+
+		<context id="complex" style-ref="complex">
+			<match>(?&lt;![\w\.])(\%{float}|\d+)[jJ]\b</match>
+		</context>
+
+		<context id="float" style-ref="floating-point">
+			<match>(?&lt;![\w\.])\%{float}(?![\w\.])</match>
+		</context>
+
+		<context id="function-definition">
+		</context>
+
+		<context id="class-definition">
+			<match extended="true">
+				(class)
+				\s+
+				(\%{identifier})
+			</match>
+			<include>
+				<context sub-pattern="1" style-ref="keyword"/>
+				<context sub-pattern="2" style-ref="class-name"/>
+			</include>
+		</context>
+
+		<context id="decorator" style-ref="decorator">
+			<match>@\%{identifier-path}</match>
+		</context>
+
+		<context id="keywords" style-ref="keyword">
+			<keyword>if</keyword>
+			<keyword>for</keyword>
+			<keyword>in</keyword>
+			<keyword>while</keyword>
+			<keyword>else</keyword>
+			<keyword>class</keyword>
+
+			<keyword>return</keyword>
+			<keyword>break</keyword>
+			<keyword>continue</keyword>
+			<keyword>import</keyword>
+			<keyword>delete</keyword>
+			<keyword>assert</keyword>
+			<keyword>breakpoint</keyword>
+
+			<keyword>main</keyword>
+			<keyword>exit</keyword>
+
+			<keyword>init</keyword>
+			<keyword>constr</keyword>
+			<keyword>repr</keyword>
+			<keyword>eq</keyword>
+
+			<keyword>const</keyword>
+			<keyword>static</keyword>
+			<keyword>volatile</keyword>
+			<keyword>property</keyword>
+
+			<keyword>is</keyword>
+			<keyword>in</keyword>
+			<keyword>not</keyword>
+			<keyword>and</keyword>
+			<keyword>but</keyword>
+			<keyword>xor</keyword>
+			<keyword>or</keyword>
+			<keyword>isof</keyword>
+			<keyword>to</keyword>
+		</context>
+
+		<context id="reserved-keywords" style-ref="reserved">
+			<keyword>def</keyword>
+			<keyword>try</keyword>
+			<keyword>catch</keyword>
+			<keyword>except</keyword>
+			<keyword>finally</keyword>
+			<keyword>raise</keyword>
+			<keyword>with</keyword>
+			<keyword>yield</keyword>
+		</context>
+
+		<context id="builtin-constants" style-ref="builtin-constant">
+			<prefix>(?&lt;![\w\.])</prefix>
+			<keyword>none</keyword>
+			<keyword>null</keyword>
+		</context>
+
+		<context id="builtin-objects" style-ref="builtin-object">
+			<prefix>(?&lt;![\w\.])</prefix>
+			<keyword>stdio</keyword>
+			<keyword>globals</keyword>
+		</context>
+
+		<context id="builtin-types" style-ref="builtin-type">
+			<prefix>(?&lt;![\w\.])</prefix>
+			<keyword>i8</keyword>
+			<keyword>i16</keyword>
+			<keyword>i32</keyword>
+			<keyword>i64</keyword>
+			<keyword>i128</keyword>
+
+			<keyword>u8</keyword>
+			<keyword>u16</keyword>
+			<keyword>u32</keyword>
+			<keyword>u64</keyword>
+			<keyword>u128</keyword>
+
+			<keyword>f8</keyword>
+			<keyword>f16</keyword>
+			<keyword>f32</keyword>
+			<keyword>f64</keyword>
+			<keyword>f128</keyword>
+
+			<keyword>uf8</keyword>
+			<keyword>uf16</keyword>
+			<keyword>uf32</keyword>
+			<keyword>uf64</keyword>
+			<keyword>uf128</keyword>
+
+			<keyword>int</keyword>
+			<keyword>uint</keyword>
+			<keyword>float</keyword>
+			<keyword>ufloat</keyword>
+			<keyword>bool</keyword>
+			<keyword>byte</keyword>
+			<keyword>char</keyword>
+			<keyword>str</keyword>
+			<keyword>void</keyword>
+
+			<keyword>auto</keyword>
+
+			<keyword>dict</keyword>
+			<keyword>list</keyword>
+			<keyword>map</keyword>
+			<keyword>object</keyword>
+			<keyword>range</keyword>
+			<keyword>set</keyword>
+			<keyword>tuple</keyword>
+		</context>
+
+		<context id="slang" class="no-spell-check">
+			<include>
+				<context ref="def:shebang"/>
+				<context ref="close-comment-outside-comment" style-ref="def:error"/>
+				<context ref="multiline-comment" style-ref="def:comment"/>
+				<context ref="comment" style-ref="def:comment"/>
+				<context ref="multiline-double-quoted-string"/>
+				<context ref="multiline-single-quoted-string"/>
+				<context ref="double-quoted-string"/>
+				<context ref="single-quoted-string"/>
+				<context ref="char"/>
+				<context ref="boolean"/>
+				<context ref="complex"/>
+				<context ref="float"/>
+				<context ref="def:decimal"/>
+				<context ref="def:octal"/>
+				<context ref="def:hexadecimal"/>
+				<context ref="function-definition"/>
+				<context ref="class-definition"/>
+				<context ref="decorator"/>
+				<context ref="keywords"/>
+				<context ref="reserved-keywords"/>
+				<context ref="builtin-constants"/>
+				<context ref="builtin-objects"/>
+				<context ref="builtin-types"/>
+			</include>
+		</context>
+	</definitions>
+</language>

@@ -2,7 +2,8 @@
 # Slang AST
 
 import abc
-from .tokens import *
+from . import sld
+from .lexer import *
 from utils import *
 
 DEBUG_PRECEDENCE = False
@@ -17,11 +18,10 @@ def literal_type(x):
 	return type(r)
 
 def common_type(l, ns): # TODO
-	r = set()
-	for i in l: r.add(Signature.build(i, ns))
+	r = tuple(Signature.build(i, ns) for i in l)
 	if (not r): return None
 	if (len(r) > 1): raise TODO(r)
-	return next(iter(r))
+	return first(r)
 
 class ASTNode(abc.ABC):
 	__slots__ = ('lineno', 'offset', 'flags')
@@ -99,10 +99,10 @@ class ASTCodeNode(ASTNode):
 		self.nodes, self.name = nodes, name
 
 	def __repr__(self):
-		return (S('\n').join(self.nodes).indent().join('\n\n') if (self.nodes) else '').join('{}')
+		return f"""<Code{f" '{self.name}'" if (self.name and self.name != '<code>') else ''}>"""
 
 	def __str__(self):
-		return f"""<Code{f" '{self.name}'" if (self.name and self.name != '<code>') else ''}>"""
+		return (S('\n').join(self.nodes).indent().join('\n\n') if (self.nodes) else '').join('{}')
 
 	@classmethod
 	def build(cls, name):
@@ -132,7 +132,7 @@ class ASTTokenNode(ASTNode):
 		super().build(tl)
 		off = int()
 		for ii, i in enumerate(tl.copy()):
-			if (i.typename == 'SPECIAL' and (i.token[0] == '#' or i.token == '\\\n')): del tl[ii-off]; off += 1
+			if (i.typename == 'SPECIAL' and (i.token[0] == '#' or i.token == '\\')): del tl[ii-off]; off += 1
 		if (not tl): raise SlSyntaxEmpty()
 
 	@property
@@ -257,16 +257,18 @@ class ASTValueNode(ASTPrimitiveNode):
 		super().build(tl)
 		lineno, offset = tl[0].lineno, tl[0].offset
 
-		types = [ASTLiteralNode, ASTFunccallNode, ASTAttrgetNode, ASTItemgetNode, ASTIdentifierNode, ASTLambdaNode]
-		if (fcall): types.remove(ASTFunccallNode); types.remove(ASTLambdaNode)
 		if (tl[0].typename == 'LITERAL'): value = ASTLiteralNode.build(tl)
 		else:
+			types = allsubclasses(ASTLiteralStructNode)+[ASTLiteralNode, ASTFunccallNode, ASTAttrgetNode, ASTItemgetNode, ASTIdentifierNode, ASTLambdaNode]
+			if (fcall): types.remove(ASTFunccallNode); types.remove(ASTLambdaNode) # XXX lambda too?
+			err = set()
 			for i in types:
 				tll = tl.copy()
 				try: value = i.build(tll)
+				except SlSyntaxExpectedError as ex: err.add(ex); continue
 				except SlSyntaxException: continue
 				else: tl[:] = tll; break
-			else: raise SlSyntaxExpectedError('Value', tl[0])
+			else: raise SlSyntaxMultiExpectedError.from_list(err)
 
 		return cls(value, lineno=lineno, offset=offset)
 
@@ -278,7 +280,7 @@ class ASTValueNode(ASTPrimitiveNode):
 
 	def optimize(self, ns):
 		super().optimize(ns)
-		if (isinstance(self.value, ASTIdentifierNode) and self.value in ns.values): self.value = ASTLiteralNode(repr(ns.values[self.value]), lineno=self.lineno, offset=self.offset) # TODO FIXME in functions
+		if (isinstance(self.value, ASTIdentifierNode) and ns.values.get(self.value)): self.value = ASTLiteralNode(repr(ns.values[self.value]), lineno=self.lineno, offset=self.offset) # TODO FIXME in functions
 
 class ASTItemgetNode(ASTPrimitiveNode):
 	__slots__ = ('value', 'key')
@@ -298,7 +300,18 @@ class ASTItemgetNode(ASTPrimitiveNode):
 		value = ASTIdentifierNode.build(tl) # TODO: value/expr
 		bracket = ASTSpecialNode.build(tl)
 		if (bracket.special != '['): raise SlSyntaxExpectedError("'['", bracket)
-		key = ASTExprNode.build(tl)
+		start = None
+		stop = None
+		step = None
+		if (tl and not (tl[0].typename == 'SPECIAL' and tl[0].token == ':')): start = ASTExprNode.build(tl)
+		if (tl and tl[0].typename == 'SPECIAL' and tl[0].token == ':'):
+			ASTSpecialNode.build(tl)
+			if (tl and not (tl[0].typename == 'SPECIAL' and tl[0].token in ']:')): stop = ASTExprNode.build(tl)
+			if (tl and tl[0].typename == 'SPECIAL' and tl[0].token == ':'):
+				ASTSpecialNode.build(tl)
+				if (tl and not (tl[0].typename == 'SPECIAL' and tl[0].token == ']')): step = ASTExprNode.build(tl)
+			key = slice(start, stop, step)
+		else: key = start
 		bracket = ASTSpecialNode.build(tl)
 		if (bracket.special != ']'): raise SlSyntaxExpectedError("']'", bracket)
 
@@ -308,7 +321,7 @@ class ASTItemgetNode(ASTPrimitiveNode):
 		super().validate(ns)
 		valsig = Signature.build(self.value, ns)
 		keysig = Signature.build(self.key, ns)
-		if (keysig not in valsig.itemget): raise SlValidationError(f"'{valsig}' does not support itemget by key of type '{keysig}'", self, scope=ns.scope)
+		if ((keysig, self.key) not in valsig.itemget): raise SlValidationError(f"'{valsig}' does not support itemget by key of type '{keysig}'", self, scope=ns.scope)
 
 class ASTAttrgetNode(ASTPrimitiveNode):
 	__slots__ = ('value', 'optype', 'attr')
@@ -334,7 +347,8 @@ class ASTAttrgetNode(ASTPrimitiveNode):
 
 	def validate(self, ns):
 		super().validate(ns)
-		if (self.optype not in Signature.build(self.value, ns).attrops): raise SlValidationError(f"'{self.value}' does not support attribute operation '{self.optype}'", self, scope=ns.scope)
+		valsig = Signature.build(self.value, ns)
+		if ((self.optype.special, self.attr.identifier) not in valsig.attrops): raise SlValidationError(f"'{valsig}' does not support attribute operation '{self.optype}' with attr '{self.attr}'", self, scope=ns.scope)
 
 class ASTExprNode(ASTPrimitiveNode):
 	@classmethod
@@ -343,11 +357,10 @@ class ASTExprNode(ASTPrimitiveNode):
 		lineno, offset = tl[0].lineno, tl[0].offset
 
 		for ii, p in enumerate(operators[::-1]):
-			for i in p:
-				tll = tl.copy()
-				try: value = ASTBinaryExprNode.build(tll, i)
-				except SlSyntaxException: continue
-				else: tl[:] = tll; return value
+			tll = tl.copy()
+			try: value = ASTBinaryExprNode.build(tll, p)
+			except SlSyntaxException: continue
+			else: tl[:] = tll; return value
 
 		tll = tl.copy()
 		try: value = ASTUnaryExprNode.build(tll)
@@ -356,30 +369,33 @@ class ASTExprNode(ASTPrimitiveNode):
 
 		tll = tl.copy()
 		try: value = ASTValueNode.build(tll, fcall=fcall)
-		except SlSyntaxException: pass
+		except SlSyntaxException as ex: pass
 		else: tl[:] = tll; return value
 
-		parenthesis = ASTSpecialNode.build(tl)
-		if (parenthesis.special != '('): raise SlSyntaxExpectedError('Expr', parenthesis)
-		parenthesized = list()
-		lvl = 1
-		while (tl):
-			if (tl[0].typename == 'SPECIAL'): lvl += 1 if (tl[0].token == '(') else -1 if (tl[0].token == ')') else 0
-			if (lvl == 0):
-				parenthesis = ASTSpecialNode.build(tl)
-				if (parenthesis.special != ')'): raise SlSyntaxExpectedError("')'", parenthesis)
-				break
-			assert lvl > 0
-			parenthesized.append(tl.pop(0))
-		value = ASTExprNode.build(parenthesized)
-		if (parenthesized): raise SlSyntaxExpectedNothingError(parenthesized[0])
-		return value
+		try:
+			parenthesis = ASTSpecialNode.build(tl)
+			if (parenthesis.special != '('): raise SlSyntaxExpectedError('Expr', parenthesis)
+			parenthesized = list()
+			lvl = 1
+			while (tl):
+				if (tl[0].typename == 'SPECIAL'): lvl += 1 if (tl[0].token == '(') else -1 if (tl[0].token == ')') else 0
+				if (lvl == 0):
+					parenthesis = ASTSpecialNode.build(tl)
+					if (parenthesis.special != ')'): raise SlSyntaxExpectedError("')'", parenthesis)
+					break
+				assert (lvl > 0)
+				parenthesized.append(tl.pop(0))
+			value = ASTExprNode.build(parenthesized)
+			if (parenthesized): raise SlSyntaxExpectedNothingError(parenthesized[0])
+		except SlSyntaxException: pass # TODO
+		else: return value
+		raise SlSyntaxExpectedError('Expr', lineno=lineno, offset=offset)
 
 class ASTUnaryExprNode(ASTExprNode):
 	__slots__ = ('operator', 'value')
 
 	def __init__(self, operator, value, **kwargs):
-		super(ASTPrimitiveNode, self).__init__(**kwargs)
+		super().__init__(**kwargs)
 		self.operator, self.value = operator, value
 
 	def __str__(self):
@@ -391,50 +407,53 @@ class ASTUnaryExprNode(ASTExprNode):
 		lineno, offset = tl[0].lineno, tl[0].offset
 
 		operator = ASTOperatorNode.build(tl)
-		if (operator.operator in bothoperators): operator.operator = UnaryOperator(operator.operator)
-		elif (not isinstance(operator.operator, UnaryOperator)): raise SlSyntaxExpectedError('UnaryOperator', operator)
+		if (not isinstance(operator.operator, UnaryOperator)): raise SlSyntaxExpectedError('UnaryOperator', operator)
 		value = ASTExprNode.build(tl)
 
 		return cls(operator, value, lineno=lineno, offset=offset)
 
 	def validate(self, ns):
 		super().validate(ns)
-		sig = Signature.build(self.value, ns)
+		valsig = Signature.build(self.value, ns)
 		op = self.operator.operator
-		if (op not in sig.operators): raise SlValidationError(f"'{sig}' does not support unary operator '{op}'", self, scope=ns.scope)
+		if (op not in valsig.operators): raise SlValidationError(f"'{valsig}' does not support unary operator '{op}'", self, scope=ns.scope)
 
 	def optimize(self, ns):
 		super().optimize(ns)
-		sig = Signature.build(self.value, ns)
-		if (self.value in ns.values): return ASTValueNode(ASTLiteralNode(eval(f"{self.operator} {ns.values[self.value]}"), lineno=self.lineno, offset=self.offset), lineno=self.lineno, offset=self.offset)
+		if (ns.values.get(self.value)): return ASTValueNode(ASTLiteralNode(eval(f"{'not' if (self.operator.operator == '!') else self.operator} {ns.values[self.value]}"), lineno=self.lineno, offset=self.offset), lineno=self.lineno, offset=self.offset)
 
 class ASTBinaryExprNode(ASTExprNode):
 	__slots__ = ('lvalue', 'operator', 'rvalue')
 
 	def __init__(self, lvalue, operator, rvalue, **kwargs):
-		super(ASTPrimitiveNode, self).__init__(**kwargs)
+		super().__init__(**kwargs)
 		self.lvalue, self.operator, self.rvalue = lvalue, operator, rvalue
 
 	def __str__(self):
 		return f"{str(self.lvalue).join('()') if (DEBUG_PRECEDENCE or isinstance(self.lvalue, ASTBinaryExprNode) and operator_precedence(self.lvalue.operator.operator) > operator_precedence(self.operator.operator)) else self.lvalue}{str(self.operator).join('  ') if (operator_precedence(self.operator.operator) > 0) else self.operator}{str(self.rvalue).join('()') if (DEBUG_PRECEDENCE or isinstance(self.rvalue, ASTBinaryExprNode) and operator_precedence(self.rvalue.operator.operator) > operator_precedence(self.operator.operator)) else self.rvalue}"
 
 	@classmethod
-	def build(cls, tl, op):
+	def build(cls, tl, opset):
 		ASTPrimitiveNode.build(tl)
 		lineno, offset = tl[0].lineno, tl[0].offset
 
-		lasti = None
+		lasti = list()
 		lvl = int()
 		for ii, i in enumerate(tl):
 			if (i.typename == 'SPECIAL'): lvl += 1 if (i.token == '(') else -1 if (i.token == ')') else 0
 			if (lvl > 0): continue
-			if (i.typename == 'OPERATOR' and isinstance(i.token, BinaryOperator) and i.token == op): lasti = ii
-		if (lasti is None): raise SlSyntaxExpectedError('BinaryOperator', tl[0])
-		tll, tl[:] = tl[:lasti], tl[lasti:]
-		lvalue = ASTExprNode.build(tll)
-		if (tll): raise SlSyntaxExpectedNothingError(tll[0])
-		operator = ASTOperatorNode.build(tl)
-		rvalue = ASTExprNode.build(tl)
+			if (i.typename == 'OPERATOR' and isinstance(i.token, BinaryOperator) and i.token in opset): lasti.append(ii)
+		for i in lasti[::-1]:
+			tlr, tll = tl[:i], tl[i:]
+			err = set()
+			try:
+				lvalue = ASTExprNode.build(tlr)
+				if (tlr): raise SlSyntaxExpectedNothingError(tlr[0])
+				operator = ASTOperatorNode.build(tll)
+				rvalue = ASTExprNode.build(tll)
+			except SlSyntaxException: pass
+			else: tl[:] = tll; break
+		else: raise SlSyntaxExpectedError('BinaryOperator', tl[0])
 
 		return cls(lvalue, operator, rvalue, lineno=lineno, offset=offset)
 
@@ -447,8 +466,83 @@ class ASTBinaryExprNode(ASTExprNode):
 
 	def optimize(self, ns):
 		super().optimize(ns)
-		if (self.operator.operator == '**' and self.lvalue in ns.values and ns.values[self.lvalue] == 2): self.operator.operator, self.lvalue.value, ns.values[self.lvalue] = BinaryOperator('<<'), ASTLiteralNode('1', lineno=self.lvalue.value.lineno, offset=self.lvalue.value.offset), 1
-		if (self.lvalue in ns.values and self.rvalue in ns.values and self.operator.operator != 'to'): return ASTValueNode(ASTLiteralNode(repr(eval(str(self))), lineno=self.lineno, offset=self.offset), lineno=self.lineno, offset=self.offset)
+		if (self.operator.operator == '**' and ns.values.get(self.lvalue) == 2 and (ns.values.get(self.rvalue) or 0) > 0): self.operator.operator, self.lvalue.value, ns.values[self.lvalue] = BinaryOperator('<<'), ASTLiteralNode('1', lineno=self.lvalue.value.lineno, offset=self.lvalue.value.offset), 1
+		if (ns.values.get(self.lvalue) and ns.values.get(self.rvalue) and self.operator.operator != 'to'): return ASTValueNode(ASTLiteralNode(repr(eval(str(self))), lineno=self.lineno, offset=self.offset), lineno=self.lineno, offset=self.offset)
+
+class ASTLiteralStructNode(ASTNode): pass
+
+class ASTListNode(ASTLiteralStructNode):
+	__slots__ = ('type', 'values')
+
+	def __init__(self, type, values, **kwargs):
+		super().__init__(**kwargs)
+		self.type, self.values = type, values
+
+	def __repr__(self):
+		return f"<List of '{self.type}'>"
+
+	def __str__(self):
+		return f"[{self.type}{': ' if (self.values) else ''}{S(', ').join(self.values)}]"
+
+	@classmethod
+	def build(cls, tl):
+		super().build(tl)
+		lineno, offset = tl[0].lineno, tl[0].offset
+
+		bracket = ASTSpecialNode.build(tl)
+		if (bracket.special != '['): raise SlSyntaxExpectedError("'['", bracket)
+		type = ASTIdentifierNode.build(tl)
+		values = list()
+		if (not (tl[0].typename == 'SPECIAL' and tl[0].token == ']')):
+			colon = ASTSpecialNode.build(tl)
+			if (colon.special != ':'): raise SlSyntaxExpectedError("':'", colon)
+			while (tl and tl[0].typename != 'SPECIAL'):
+				values.append(ASTExprNode.build(tl))
+				if (tl and tl[0].typename == 'SPECIAL' and tl[0].token == ','): ASTSpecialNode.build(tl)
+		bracket = ASTSpecialNode.build(tl)
+		if (bracket.special != ']'): raise SlSyntaxExpectedError("']'", bracket)
+
+		return cls(type, values, lineno=lineno, offset=offset)
+
+	def validate(self, ns):
+		typesig = Signature.build(self.type, ns)
+		for i in self.values:
+			if (Signature.build(i, ns) != typesig): raise SlValidationError(f"List item '{i}' does not match list type '{self.type}'", self, scope=ns.scope)
+
+class ASTTupleNode(ASTLiteralStructNode):
+	__slots__ = ('types', 'values')
+
+	def __init__(self, types, values, **kwargs):
+		super().__init__(**kwargs)
+		self.types, self.values = types, values
+
+	def __repr__(self):
+		return f"<Tuple ({S(', ').join(self.types)})>"
+
+	def __str__(self):
+		return f"({S(', ').join((str(self.types[i])+' ' if (self.types[i] is not None) else '')+str(self.values[i]) for i in range(len(self.values)))}{','*(len(self.values) == 1)})"
+
+	@classmethod
+	def build(cls, tl):
+		super().build(tl)
+		lineno, offset = tl[0].lineno, tl[0].offset
+
+		parenthesis = ASTSpecialNode.build(tl)
+		if (parenthesis.special != '('): raise SlSyntaxExpectedError("'('", parenthesis)
+		types = list()
+		values = list()
+		while (tl and not (tl[0].typename == 'SPECIAL' and tl[0].token == ')')):
+			types.append(ASTIdentifierNode.build(tl) if (len(tl) >= 2 and tl[0].typename == 'IDENTIFIER' and tl[1].token != ',') else None)
+			values.append(ASTExprNode.build(tl))
+			if (len(values) < 2 or tl and tl[0].typename == 'SPECIAL' and tl[0].token == ','): ASTSpecialNode.build(tl)
+		parenthesis = ASTSpecialNode.build(tl)
+		if (parenthesis.special != ')'): raise SlSyntaxExpectedError("')'", parenthesis)
+
+		return cls(types, values, lineno=lineno, offset=offset)
+
+	def validate(self, ns):
+		for i in range(len(self.values)):
+			if (Signature.build(self.values[i], ns) != Signature.build(self.types[i], ns)): raise SlValidationError(f"Tuple item '{self.values[i]}' does not match its type '{self.types[i]}'", self, scope=ns.scope)
 
 class ASTNonFinalNode(ASTNode): pass
 
@@ -493,7 +587,7 @@ class ASTArgdefNode(ASTNonFinalNode):
 		type = ASTTypedefNode.build(tl)
 		name = ASTIdentifierNode.build(tl)
 		modifier = ASTOperatorNode.build(tl) if (tl and tl[0].typename == 'OPERATOR' and tl[0].token in '+**') else ASTSpecialNode.build(tl) if (tl and tl[0].typename == 'SPECIAL' and tl[0].token in '?=') else None
-		value = ASTValueNode.build(tl) if (modifier == '=') else None
+		value = ASTValueNode.build(tl) if (isinstance(modifier, ASTSpecialNode) and modifier.special == '=') else None
 
 		return cls(type, name, modifier, value, lineno=lineno, offset=offset)
 
@@ -568,26 +662,28 @@ class ASTCallkwargsNode(ASTNonFinalNode):
 class ASTCallableNode(ASTNode):
 	def validate(self, ns):
 		super().validate(ns)
-		#dlog('-->', self.code.name)
 		code_ns = ns.derive(self.code.name)
-		for i in self.argdefs: code_ns.define(i, redefine=True)
+		code_ns.define(self, redefine=True)
+		for i in self.argdefs:
+			code_ns.define(i, redefine=True)
 		self.code.validate(code_ns)
+
+	def optimize(self, ns):
+		super().optimize(ns)
+		code_ns = ns.derive(self.code.name)
+		self.code.optimize(code_ns)
+
+class ASTFunctionNode(ASTCallableNode):
+	def validate(self, ns):
+		super().validate(ns)
+		code_ns = ns.derive(self.code.name)
 		rettype = common_type((i.value for i in self.code.nodes if (isinstance(i, ASTKeywordExprNode) and i.keyword.keyword == 'return')), code_ns) or stdlib.void()
 		if (self.type.type.identifier == 'auto'): self.type.type.identifier = rettype.typename
 		else:
 			expected = Signature.build(self.type, ns)
 			if (rettype != expected): raise SlValidationError(f"Returning value of type '{rettype}' from function with return type '{expected}'", self, scope=ns.scope)
-		#dlog('<--', self.code.name)
 
-	def optimize(self, ns):
-		super().optimize(ns)
-		#dlog('-->', self.code.name)
-		code_ns = ns.derive(self.code.name)
-		for i in self.argdefs: code_ns.define(i, redefine=True)
-		self.code.optimize(code_ns)
-		#dlog('<--', self.code.name)
-
-class ASTLambdaNode(ASTNonFinalNode, ASTCallableNode):
+class ASTLambdaNode(ASTNonFinalNode, ASTFunctionNode):
 	__slots__ = ('argdefs', 'type', 'code')
 
 	def __init__(self, argdefs, type, code, **kwargs):
@@ -601,7 +697,7 @@ class ASTLambdaNode(ASTNonFinalNode, ASTCallableNode):
 		return f"<Lambda '{self.__fsig__()} {{...}}' on line {self.lineno}, offset {self.offset}>"
 
 	def __str__(self):
-		return f"{self.__fsig__()} {f'= {self.code.nodes[0].value}' if (len(self.code.nodes) == 1 and isinstance(self.code.nodes[0], ASTKeywordExprNode) and self.code.nodes[0].keyword.keyword == 'return') else repr(self.code)}"
+		return f"{self.__fsig__()} {f'= {self.code.nodes[0].value}' if (len(self.code.nodes) == 1 and isinstance(self.code.nodes[0], ASTKeywordExprNode) and self.code.nodes[0].keyword.keyword == 'return') else self.code}"
 
 	@classmethod
 	def build(cls, tl):
@@ -634,7 +730,7 @@ class ASTBlockNode(ASTNonFinalNode):
 		self.code = code
 
 	def __str__(self):
-		return repr(self.code) if (len(self.code.nodes) > 1) else repr(self.code)[1:-1].strip()
+		return str(self.code) if (len(self.code.nodes) > 1) else str(self.code)[1:-1].strip()
 
 	@classmethod
 	def build(cls, tl):
@@ -654,10 +750,10 @@ class ASTFinalNode(ASTNode): pass
 
 class ASTDefinitionNode(ASTNode):
 	def validate(self, ns):
+		Signature.build(self, ns)
 		super().validate(ns)
-		ns.define(self)
 
-class ASTFuncdefNode(ASTFinalNode, ASTDefinitionNode, ASTCallableNode):
+class ASTFuncdefNode(ASTFinalNode, ASTDefinitionNode, ASTFunctionNode):
 	__slots__ = ('type', 'name', 'argdefs', 'code')
 
 	def __init__(self, type, name, argdefs, code, **kwargs):
@@ -671,8 +767,8 @@ class ASTFuncdefNode(ASTFinalNode, ASTDefinitionNode, ASTCallableNode):
 		return f"<Funcdef '{self.__fsig__()} {{...}}' on line {self.lineno}, offset {self.offset}>"
 
 	def __str__(self):
-		isexpr = len(self.code.nodes) == 1 and isinstance(self.code.nodes[0], ASTKeywordExprNode) and self.code.nodes[0].keyword.keyword == 'return'
-		r = f"{self.__fsig__()} {f'= {self.code.nodes[0].value}' if (isexpr) else repr(self.code)}"
+		isexpr = (len(self.code.nodes) == 1 and isinstance(self.code.nodes[0], ASTKeywordExprNode) and self.code.nodes[0].keyword.keyword == 'return')
+		r = f"{self.__fsig__()} {f'= {self.code.nodes[0].value}' if (isexpr) else self.code}"
 		return r if (isexpr) else r.join('\n\n')
 
 	@classmethod
@@ -703,6 +799,45 @@ class ASTFuncdefNode(ASTFinalNode, ASTDefinitionNode, ASTCallableNode):
 
 		return cls(type, name, argdefs, code, lineno=lineno, offset=offset)
 
+class ASTClassdefNode(ASTFinalNode, ASTDefinitionNode, ASTCallableNode):
+	__slots__ = ('name', 'bases', 'code', 'type')
+
+	argdefs = ()
+
+	def __init__(self, name, bases, code, **kwargs):
+		super().__init__(**kwargs)
+		self.name, self.bases, self.code = name, bases, code
+		self.type = ASTTypedefNode([], self.name, lineno=self.lineno, offset=self.offset)
+
+	def __repr__(self):
+		return f"<Classdef '{self.name}' on line {self.lineno}, offset {self.offset}>"
+
+	def __str__(self):
+		return f"class {self.name}{S(', ').join(self.bases).join('()') if (self.bases) else ''} {self.code}"
+
+	@classmethod
+	def build(cls, tl):
+		super().build(tl)
+		lineno, offset = tl[0].lineno, tl[0].offset
+
+		class_ = ASTKeywordNode.build(tl)
+		if (class_.keyword != 'class'): raise SlSyntaxExpectedError("'class'", class_)
+		name = ASTIdentifierNode.build(tl)
+		bases = list()
+		if (tl and tl[0].typename == 'SPECIAL' and tl[0].token == '('):
+			parenthesis = ASTSpecialNode.build(tl)
+			if (parenthesis.special != '('): raise SlSyntaxExpectedError("'('", parenthesis)
+			while (tl and tl[0].typename != 'SPECIAL'):
+				bases.append(ASTIdentifierNode.build(tl))
+				if (tl and tl[0].typename == 'SPECIAL' and tl[0].token == ','): ASTSpecialNode.build(tl)
+			parenthesis = ASTSpecialNode.build(tl)
+			if (parenthesis.special != ')'): raise SlSyntaxExpectedError("')'", parenthesis)
+		cdef = ASTSpecialNode.build(tl)
+		if (cdef.special != '{'): raise SlSyntaxExpectedError("'{'", cdef)
+		code = (yield from ASTCodeNode.build(name.identifier))
+
+		return cls(name, bases, code, lineno=lineno, offset=offset)
+
 class ASTKeywordExprNode(ASTFinalNode):
 	__slots__ = ('keyword', 'value')
 
@@ -720,28 +855,113 @@ class ASTKeywordExprNode(ASTFinalNode):
 
 		keyword = ASTKeywordNode.build(tl)
 		if (not isinstance(keyword.keyword, ExprKeyword)): raise SlSyntaxExpectedError('ExprKeyword', keyword)
-		if (not tl): value = None
-		elif (keyword.keyword == 'import'):
+		if (keyword.keyword == 'import'):
+			if (not tl): raise SlSyntaxExpectedMoreTokensError('import', lineno=lineno)
 			lineno_, offset_ = tl[0].lineno, tl[0].offset
 			value = ASTIdentifierNode(str().join(tl.pop(0).token for _ in range(len(tl))), lineno=lineno_, offset=offset_) # TODO Identifier? (or document it)
-		else: value = ASTExprNode.build(tl)
+		elif (keyword.keyword == 'delete'):
+			value = ASTIdentifierNode.build(tl)
+			#if (not value): raise SlSyntaxExpectedError('identifier', lineno=lineno, offset=-1)
+		elif (tl): value = ASTExprNode.build(tl)
+		else: value = None
 
 		return cls(keyword, value, lineno=lineno, offset=offset)
 
 	def validate(self, ns):
 		if (self.keyword.keyword == 'import'):
-			ns.define(ASTIdentifierNode(self.value.identifier.partition('::')[2], lineno=self.value.lineno, offset=self.value.offset))
-			return
+			m = re.fullmatch(r'(?:(?:(\w+):)?(?:([\w./]+)/)?([\w.]+):)?([\w*]+)', self.value.identifier)
+			assert (m is not None)
+			namespace, path, pkg, name = m.groups()
+			if (namespace is None): namespace = 'sl'
+			if (path is None): path = '.'
+			if (pkg is None): pkg = name
+			pkg = pkg.replace('.', '/')
+			if (namespace != 'sl'):
+				filename = f"{os.path.join(path, pkg)}.sld"
+				f = sld.parse(open(filename).read())
+				module_ns = f.namespace
+			else:
+				filename = f"{os.path.join(path, pkg)}.sl"
+				src = open(filename, 'r').read()
+				try:
+					tl = parse_string(src)
+					ast = build_ast(tl, filename)
+					optimize_ast(ast, validate_ast(ast))
+					module_ns = validate_ast(ast)
+				except (SlSyntaxError, SlValidationError) as ex:
+					ex.line = src.split('\n')[ex.lineno-1]
+					raise SlValidationError(f"Error importing {self.value}", self, scope=ns.scope) from ex
+			if (name != '*'): ns.define(ASTIdentifierNode(name, lineno=self.value.lineno, offset=self.value.offset)) # TODO object
+			else: ns.signatures.update(module_ns.signatures) # TODO?
+			#return # XXX?
+		elif (self.keyword.keyword == 'delete'):
+			if (self.value.identifier not in ns): raise SlValidationNotDefinedError(self.value, scope=ns.scope)
+			ns.delete(self.value)
 		super().validate(ns)
+
+class ASTKeywordDefNode(ASTFinalNode):
+	__slots__ = ('keyword', 'name', 'argdefs', 'code')
+
+	def __init__(self, keyword, name, argdefs, code, **kwargs):
+		super().__init__(**kwargs)
+		self.keyword, self.name, self.argdefs, self.code = keyword, name, argdefs, code
+		if (self.name is None): self.name = ASTIdentifierNode(self.code.name, lineno=self.lineno, offset=self.offset)
+
+	def __repr__(self):
+		return f"<KeywordDef '{self.name}' on line {self.lineno}, offset {self.offset}>"
+
+	def __str__(self):
+		return f"{self.keyword}{' '+S(', ').join(self.argdefs).join('()') if (isinstance(self.keyword.keyword, DefArgsKeyword)) else f' {self.name}' if (isinstance(self.keyword.keyword, DefNamedKeyword)) else ''} {self.code}"
+
+	@classmethod
+	def build(cls, tl):
+		super().build(tl)
+		lineno, offset = tl[0].lineno, tl[0].offset
+
+		keyword = ASTKeywordNode.build(tl)
+		if (not isinstance(keyword.keyword, DefKeyword)): raise SlSyntaxExpectedError('DefKeyword', keyword)
+		name = None
+		argdefs = None
+		if (isinstance(keyword.keyword, DefNamedKeyword)):
+			name = ASTIdentifierNode.build(tl)
+		elif (isinstance(keyword.keyword, DefArgsKeyword)):
+			parenthesis = ASTSpecialNode.build(tl)
+			if (parenthesis.special != '('): raise SlSyntaxExpectedError("'('", parenthesis)
+			argdefs = list()
+			while (tl and tl[0].typename != 'SPECIAL'):
+				argdef = ASTArgdefNode.build(tl)
+				if (argdefs and argdef.value is None and argdefs[-1].value is not None): raise SlSyntaxError(f"Non-default argument {argdef} follows default argument {argdefs[-1]}")
+				argdefs.append(argdef)
+				if (tl and tl[0].typename == 'SPECIAL' and tl[0].token == ','): ASTSpecialNode.build(tl)
+			parenthesis = ASTSpecialNode.build(tl)
+			if (parenthesis.special != ')'): raise SlSyntaxExpectedError("')'", parenthesis)
+		cdef = ASTSpecialNode.build(tl)
+		if (cdef.special != '{'): raise SlSyntaxExpectedError('{', cdef)
+		code = (yield from ASTCodeNode.build(f"<{keyword}>"))
+
+		return cls(keyword, name, argdefs, code, lineno=lineno, offset=offset)
+
+	def validate(self, ns):
+		super().validate(ns)
+		code_ns = ns.derive(self.code.name)
+		if (isinstance(self.keyword.keyword, DefArgsKeyword)):
+			for i in self.argdefs:
+				code_ns.define(i, redefine=True)
+		self.code.validate(code_ns)
+
+	def optimize(self, ns):
+		super().optimize(ns)
+		code_ns = ns.derive(self.code.name)
+		self.code.optimize(code_ns)
 
 class ASTAssignvalNode(ASTNode):
 	def validate(self, ns):
 		super().validate(ns)
 		if (self.name.identifier not in ns): raise SlValidationNotDefinedError(self.name, scope=ns.scope)
-		vartype = ns.signatures[self.name.identifier]
+		vartype = Signature.build(self.name, ns)
 		if (self.value is not None):
 			valtype = Signature.build(self.value, ns)
-			if (vartype != valtype): raise SlValidationError(f"Assignment of '{self.value}' of type '{valtype}' to '{self.name}' of type '{vartype}'", self, scope=ns.scope)
+			if (valtype != vartype and vartype != valtype): raise SlValidationError(f"Assignment of value '{self.value}' of type '{valtype}' to variable '{self.name}' of type '{vartype}'", self, scope=ns.scope)
 
 class ASTVardefNode(ASTFinalNode, ASTAssignvalNode, ASTDefinitionNode):
 	__slots__ = ('type', 'name', 'value')
@@ -760,49 +980,124 @@ class ASTVardefNode(ASTFinalNode, ASTAssignvalNode, ASTDefinitionNode):
 
 		type = ASTTypedefNode.build(tl)
 		name = ASTIdentifierNode.build(tl)
-		assignment = ASTSpecialNode.build(tl) if (tl and tl[0].typename == 'SPECIAL') else None
-		if (assignment is not None and assignment.special != '='): raise SlSyntaxExpectedError('assignment', assignment)
-		value = ASTExprNode.build(tl) if (assignment is not None) else None
+		assignment = None
+		value = None
+		if (tl and tl[0].typename == 'SPECIAL'):
+			assignment = ASTSpecialNode.build(tl)
+			if (assignment.special != '='): raise SlSyntaxExpectedError('assignment', assignment)
+			value = ASTExprNode.build(tl)
 
 		return cls(type, name, value, lineno=lineno, offset=offset)
 
 	def validate(self, ns):
 		if (self.type.type.identifier == 'auto'): self.type.type.identifier = Signature.build(self.value, ns).typename
+		ns.define(self)
 		super().validate(ns)
 
 	def optimize(self, ns):
 		super().optimize(ns)
-		#if (ns.signatures[self.name.identifier].modifiers.const): self.flags.optimized_out = True # TODO
+		#if (Signature.build(self.name, ns).modifiers.const): self.flags.optimized_out = True # TODO
 
 class ASTAssignmentNode(ASTFinalNode, ASTAssignvalNode):
-	__slots__ = ('name', 'inplace_operator', 'value')
+	__slots__ = ('name', 'isattr', 'assignment', 'inplace_operator', 'value')
 
-	def __init__(self, name, inplace_operator, value, **kwargs):
+	def __init__(self, name, isattr, assignment, inplace_operator, value, **kwargs):
 		super().__init__(**kwargs)
-		self.name, self.inplace_operator, self.value = name, inplace_operator, value
+		self.name, self.isattr, self.assignment, self.inplace_operator, self.value = name, isattr, assignment, inplace_operator, value
 
 	def __str__(self):
-		return f"{self.name} {self.inplace_operator or ''}= {self.value}"
+		return f"{'.'*self.isattr}{self.name} {self.inplace_operator or ''}= {self.value}"
 
 	@classmethod
 	def build(cls, tl):
 		super().build(tl)
 		lineno, offset = tl[0].lineno, tl[0].offset
 
+		isattr = bool()
+		if (tl and tl[0].typename == 'SPECIAL' and tl[0].token == '.'): ASTSpecialNode.build(tl); isattr = True
 		name = ASTIdentifierNode.build(tl)
+		inplace_operator = None
+		if (tl and tl[0].typename == 'OPERATOR'):
+			inplace_operator = ASTOperatorNode.build(tl)
+			if (not isinstance(inplace_operator.operator, BinaryOperator)): raise SlSyntaxExpectedError('BinaryOperator', inplace_operator)
+		assignment = ASTSpecialNode.build(tl)
+		if (assignment.special not in ('=', ':=')): raise SlSyntaxExpectedError('assignment', assignment)
+		value = ASTExprNode.build(tl)
+
+		return cls(name, isattr, assignment, inplace_operator, value, lineno=lineno, offset=offset)
+
+	def validate(self, ns):
+		valtype = Signature.build(self.value, ns)
+		if (self.assignment.special == ':='): ns.define(self.name, valtype, redefine=True)
+		if (self.isattr): return # TODO
+		super().validate(ns)
+		vartype = Signature.build(self.name, ns)
+		if (vartype.modifiers.const): raise SlValidationError(f"Assignment to const '{self.name}'", self, scope=ns.scope)
+
+class ASTUnpackAssignmentNode(ASTFinalNode, ASTAssignvalNode):
+	__slots__ = ('names', 'assignment', 'inplace_operator', 'value')
+
+	def __init__(self, names, assignment, inplace_operator, value, **kwargs):
+		super().__init__(**kwargs)
+		self.names, self.assignment, self.inplace_operator, self.value = names, assignment, inplace_operator, value
+
+	def __str__(self):
+		return f"{S(', ').join(self.names)} {self.inplace_operator or ''}= {self.value}"
+
+	@classmethod
+	def build(cls, tl):
+		super().build(tl)
+		lineno, offset = tl[0].lineno, tl[0].offset
+
+		names = list()
+		while (tl and tl[0].typename != 'SPECIAL'):
+			names.append(ASTIdentifierNode.build(tl))
+			if (tl and tl[0].typename == 'SPECIAL' and tl[0].token == ','): ASTSpecialNode.build(tl)
 		inplace_operator = ASTOperatorNode.build(tl) if (tl and tl[0].typename == 'OPERATOR') else None
 		if (inplace_operator is not None and not isinstance(inplace_operator.operator, BinaryOperator)): raise SlSyntaxExpectedError('BinaryOperator', inplace_operator)
 		assignment = ASTSpecialNode.build(tl)
-		if (assignment.special != '='): raise SlSyntaxExpectedError('assignment', assignment)
+		if (assignment.special not in ('=', ':=')): raise SlSyntaxExpectedError('assignment', assignment)
 		value = ASTExprNode.build(tl)
 
-		return cls(name, inplace_operator, value, lineno=lineno, offset=offset)
+		return cls(names, assignment, inplace_operator, value, lineno=lineno, offset=offset)
 
 	def validate(self, ns):
-		super().validate(ns)
-		vartype = ns.signatures[self.name.identifier]
 		valtype = Signature.build(self.value, ns)
-		if (vartype.modifiers.const): raise SlValidationError(f"Assignment to const '{self.name}'", self, scope=ns.scope)
+		if (self.assignment.special == ':='):
+			for name, type in zip(self.names, valtype.valtypes):
+				ns.define(name, type, redefine=True)
+		vartypes = tuple(Signature.build(i, ns) for i in self.names)
+		for name, vartype in zip(self.names, vartypes):
+			if (vartype.modifiers.const): raise SlValidationError(f"Assignment to const '{name}'", self, scope=ns.scope)
+		if (vartypes != valtype.valtypes): raise SlValidationError(f"Unpacking assignment of '{valtype}' to variables of types {vartypes}", self, scope=ns.scope)
+
+class ASTAttrsetNode(ASTFinalNode):
+	__slots__ = ('value', 'assignment')
+
+	def __init__(self, value, assignment, **kwargs):
+		super().__init__(**kwargs)
+		self.value, self.assignment = value, assignment
+
+	def __str__(self):
+		return f"{self.value}{self.assignment}"
+
+	@classmethod
+	def build(cls, tl):
+		super().build(tl)
+		lineno, offset = tl[0].lineno, tl[0].offset
+
+		value = ASTIdentifierNode.build(tl)
+		assignment = ASTAssignmentNode.build(tl)
+		if (not assignment.isattr): raise SlSyntaxExpectedError('attrset', assignment)
+
+		return cls(value, assignment, lineno=lineno, offset=offset)
+
+	def validate(self, ns):
+		assert (self.assignment.isattr)
+		super().validate(ns)
+		# TODO: attr check
+		#valsig = Signature.build(self.value, ns)
+		#if ((self.optype.special, self.attr.identifier) not in valsig.attrops): raise SlValidationError(f"'{valsig}' does not support attribute operation '{self.optype}' with attr '{self.attr}'", self, scope=ns.scope)
 
 class ASTFunccallNode(ASTFinalNode):
 	__slots__ = ('callable', 'callargs', 'callkwargs')
@@ -832,7 +1127,7 @@ class ASTFunccallNode(ASTFinalNode):
 	def validate(self, ns):
 		super().validate(ns)
 		fsig = Signature.build(self.callable, ns)
-		if (not isinstance(fsig, Function)): raise SlValidationError(f"'{self.callable}' of type '{fsig}' is not callable", self.callable, scope=ns.scope)
+		if (not isinstance(fsig, Callable)): raise SlValidationError(f"'{self.callable}' of type '{fsig}' is not callable", self.callable, scope=ns.scope)
 		callargssig = CallArguments.build(self, ns) # TODO: starargs
 		if (callargssig not in fsig.call): raise SlValidationError(f"Parameters '({callargssig})' don't match any of '{self.callable}' signatures:\n{S(fsig.callargssigstr).indent()}\n", self, scope=ns.scope)
 
@@ -843,8 +1138,11 @@ class ASTConditionalNode(ASTFinalNode):
 		super().__init__(**kwargs)
 		self.condition, self.code = condition, code
 
+	def __repr__(self):
+		return f"<Conditional if '{self.condition}' on line {self.lineno}, offset {self.offset}>"
+
 	def __str__(self):
-		return f"if ({self.condition}) {self.code}"
+		return f"if {self.condition} {self.code}"
 
 	@classmethod
 	def build(cls, tl):
@@ -853,11 +1151,7 @@ class ASTConditionalNode(ASTFinalNode):
 
 		if_ = ASTKeywordNode.build(tl)
 		if (if_.keyword != 'if'): raise SlSyntaxExpectedError("'if'", if_)
-		parenthesis = ASTSpecialNode.build(tl)
-		if (parenthesis.special != '('): raise SlSyntaxExpectedError("'('", parenthesis)
 		condition = ASTExprNode.build(tl)
-		parenthesis = ASTSpecialNode.build(tl)
-		if (parenthesis.special != ')'): raise SlSyntaxExpectedError("')'", parenthesis)
 		code = (yield from ASTBlockNode.build(tl))
 
 		return cls(condition, code, lineno=lineno, offset=offset)
@@ -869,8 +1163,11 @@ class ASTForLoopNode(ASTFinalNode):
 		super().__init__(**kwargs)
 		self.name, self.iterable, self.code = name, iterable, code
 
+	def __repr__(self):
+		return f"<ForLoop '{self.name}' in '{self.iterable}' on line {self.lineno}, offset {self.offset}>"
+
 	def __str__(self):
-		return f"for {self.name} in ({self.iterable}) {self.code}"
+		return f"for {self.name} in {self.iterable} {self.code}"
 
 	@classmethod
 	def build(cls, tl):
@@ -880,16 +1177,18 @@ class ASTForLoopNode(ASTFinalNode):
 		for_ = ASTKeywordNode.build(tl)
 		if (for_.keyword != 'for'): raise SlSyntaxExpectedError("'for'", for_)
 		name = ASTIdentifierNode.build(tl)
-		in_ = ASTKeywordNode.build(tl)
-		if (in_.keyword != 'in'): raise SlSyntaxExpectedError("'in'", in_)
-		parenthesis = ASTSpecialNode.build(tl)
-		if (parenthesis.special != '('): raise SlSyntaxExpectedError("'('", parenthesis)
+		in_ = ASTOperatorNode.build(tl)
+		if (in_.operator != 'in'): raise SlSyntaxExpectedError("'in'", in_)
 		iterable = ASTExprNode.build(tl)
-		parenthesis = ASTSpecialNode.build(tl)
-		if (parenthesis.special != ')'): raise SlSyntaxExpectedError("')'", parenthesis)
 		code = (yield from ASTBlockNode.build(tl))
 
 		return cls(name, iterable, code, lineno=lineno, offset=offset)
+
+	def validate(self, ns):
+		super().validate(ns)
+		# TODO: validate iterability
+		ns.define(self.name, Signature.build(self.iterable, ns).valtype)
+		ns.weaken(self.name)
 
 class ASTWhileLoopNode(ASTFinalNode):
 	__slots__ = ('condition', 'code')
@@ -898,8 +1197,11 @@ class ASTWhileLoopNode(ASTFinalNode):
 		super().__init__(**kwargs)
 		self.condition, self.code = condition, code
 
+	def __repr__(self):
+		return f"<WhileLoop while '{self.condition}' on line {self.lineno}, offset {self.offset}>"
+
 	def __str__(self):
-		return f"while ({self.condition}) {self.code}"
+		return f"while {self.condition} {self.code}"
 
 	@classmethod
 	def build(cls, tl):
@@ -908,11 +1210,7 @@ class ASTWhileLoopNode(ASTFinalNode):
 
 		while_ = ASTKeywordNode.build(tl)
 		if (while_.keyword != 'while'): raise SlSyntaxExpectedError("'while'", while_)
-		parenthesis = ASTSpecialNode.build(tl)
-		if (parenthesis.special != '('): raise SlSyntaxExpectedError("'('", parenthesis)
 		condition = ASTExprNode.build(tl)
-		parenthesis = ASTSpecialNode.build(tl)
-		if (parenthesis.special != ')'): raise SlSyntaxExpectedError("')'", parenthesis)
 		code = (yield from ASTBlockNode.build(tl))
 
 		return cls(condition, code, lineno=lineno, offset=offset)
@@ -923,6 +1221,9 @@ class ASTElseClauseNode(ASTFinalNode):
 	def __init__(self, code, **kwargs):
 		super().__init__(**kwargs)
 		self.code = code
+
+	def __repr__(self):
+		return f"<ElseClause on line {self.lineno}, offset {self.offset}>"
 
 	def __str__(self):
 		return f"else {self.code}"
@@ -946,6 +1247,7 @@ def build_ast(code, name=None, *, interactive=False):
 
 	final_nodes = ASTFinalNode.__subclasses__()
 	if (interactive): final_nodes += (ASTExprNode,)
+
 	for ii, tl in enumerate(code):
 		if (not tl): continue
 		lineno, offset = tl[0].lineno, tl[0].offset
@@ -960,17 +1262,18 @@ def build_ast(code, name=None, *, interactive=False):
 					try: r = next(r)
 					except StopIteration as ex: code_stack.pop(); r = ex.args[0]
 					else:
-						assert r is None
+						assert (r is None)
 						if (c):
 							if (c[-1].typename == 'SPECIAL' and c[-1].token == '}'): code.insert(ii+1, [c.pop()])
 							code.insert(ii+1, c)
 						err.clear()
 						break
-				assert r is not None
+				assert (r is not None)
 				if (c): raise SlSyntaxExpectedNothingError(c[0])
 			except SlSyntaxEmpty: err.clear(); break
-			except SlSyntaxNoToken: err.add(SlSyntaxExpectedError(f"More tokens for {i.__name__[3:-4]}", lineno=lineno, offset=offset))
-			except SlSyntaxExpectedError as ex: ex.expected += f" at offset {ex.offset if (ex.offset != -1) else '<end of line>'} (for {i.__name__[3:-4]})"; err.add(ex)
+			except SlSyntaxNoToken: err.add(SlSyntaxExpectedMoreTokensError(i.__name__[3:-4], lineno=lineno, offset=-2))
+			except SlSyntaxMultiExpectedError as ex: pass#err.add(ex) # TODO FIXME
+			except SlSyntaxExpectedError as ex: ex.usage = i.__name__[3:-4]; err.add(ex)
 			else: code_stack[-1][0].send(r); err.clear(); break
 		else:
 			if (len(code_stack) > 1 and tl and tl[0].typename == 'SPECIAL' and tl[0].token == '}'):
@@ -980,9 +1283,9 @@ def build_ast(code, name=None, *, interactive=False):
 				else: raise WTFException()
 			elif (not err): raise SlSyntaxError("Unknown structure", lineno=lineno, offset=offset, length=0, scope='.'.join(i[1] for i in code_stack if i[1]))
 
-		if (err): raise SlSyntaxMultiExpectedError(S(sorted(set(map(operator.attrgetter('expected'), err)), reverse=True)).uniquize(), S(sorted(err, key=operator.attrgetter('offset'))).uniquize(), lineno=max(err, key=operator.attrgetter('lineno')).lineno, offset=max(err, key=lambda x: x.offset if (x.offset != -1) else inf).offset, length=min(i.length for i in err if i.length), scope='.'.join(i[1] for i in code_stack if i[1]) if (code_stack[0][1] is not None) else None)
+		if (err): raise SlSyntaxMultiExpectedError.from_list(err, scope='.'.join(i[1] for i in code_stack if i[1]) if (code_stack[0][1] is not None) else None)
 
-	assert len(code_stack) == 1
+	assert (len(code_stack) == 1)
 	try: next(code_stack.pop()[0])
 	except StopIteration as ex: return ex.args[0]
 
@@ -994,32 +1297,40 @@ def walk_ast_nodes(node):
 	for i in node.__slots__: yield from walk_ast_nodes(getattr(node, i))
 
 class _SignatureBase: pass
-
 class Signature(_SignatureBase):
 	__slots__ = ('typename', 'modifiers')
 
 	operators = dict()
-	call = dict()
-	itemget = dict()
-	attrops = ()
 
 	@init_defaults
 	@autocast
-	def __init__(self, *, typename, modifiers: paramset, attrops: tuple):
-		self.typename, self.modifiers, self.attrops = typename, modifiers, attrops
+	def __init__(self, *, typename, modifiers: paramset):
+		self.typename, self.modifiers = typename, modifiers
 
 	@property
 	def __reprname__(self):
-		return type(self).__name__
+		return self.__class__.__name__
 
 	def __repr__(self):
-		return f"<{self.__reprname__} {type(self).__name__}>"
+		return f"<{self.__reprname__} '{self.name}'>"
 
 	def __eq__(self, x):
-		return self.typename == x.typename
+		return (x is not None and self.typename == x.typename)
 
 	def __hash__(self):
 		return hash(tuple(getattr(self, i) for i in self.__slots__))
+
+	@property
+	def name(self):
+		return self.typename
+
+	@staticitemget
+	def itemget(x):
+		raise KeyError()
+
+	@staticitemget
+	def attrops(optype, attr):
+		raise KeyError()
 
 	@classmethod
 	@dispatch
@@ -1028,17 +1339,18 @@ class Signature(_SignatureBase):
 
 	@classmethod
 	@dispatch
-	def build(cls, x: ASTVardefNode, ns):
+	def build(cls, x: ASTAssignvalNode, ns):
 		r = cls.build(x.type, ns)
-		ns.signatures[x.name.identifier] = r
+		#ns.signatures[x.name.identifier] = r
 		if (x.value is not None): ns.values[x.name] = x.value if (not r.modifiers.volatile and r.modifiers.const) else None
 		return r
 
 	@classmethod
 	@dispatch
 	def build(cls, x: ASTTypedefNode, ns):
-		if (x.type.identifier not in builtin_names): raise SlValidationNotDefinedError(x.type, scope=ns.scope)
-		return builtin_names[x.type.identifier](modifiers=x.modifiers)
+		r = cls.build(x.type, ns)
+		r.modifiers.update(x.modifiers)
+		return r
 
 	@classmethod
 	@dispatch
@@ -1059,6 +1371,16 @@ class Signature(_SignatureBase):
 
 	@classmethod
 	@dispatch
+	def build(cls, x: ASTListNode, ns):
+		return Collection(keytype=stdlib.int, valtype=Signature.build(x.type, ns))
+
+	@classmethod
+	@dispatch
+	def build(cls, x: ASTTupleNode, ns):
+		return MultiCollection(keytype=stdlib.int, valtypes=tuple(Signature.build(t if (t is not None) else v, ns) for t, v in zip(x.types, x.values)))
+
+	@classmethod
+	@dispatch
 	def build(cls, x: ASTFunccallNode, ns):
 		return cls.build(x.callable, ns).call[CallArguments.build(x, ns)]
 
@@ -1069,13 +1391,23 @@ class Signature(_SignatureBase):
 
 	@classmethod
 	@dispatch
+	def build(cls, x: ASTClassdefNode, ns):
+		return Class.build(x, ns)
+
+	@classmethod
+	@dispatch
+	def build(cls, x: ASTKeywordDefNode, ns):
+		return KeywordDef.build(x, ns)
+
+	@classmethod
+	@dispatch
 	def build(cls, x: ASTItemgetNode, ns):
-		return cls.build(x.value, ns).itemget[cls.build(x.key, ns)]
+		return cls.build(x.value, ns).itemget[cls.build(x.key, ns), x.key]
 
 	@classmethod
 	@dispatch
 	def build(cls, x: ASTAttrgetNode, ns):
-		return cls.build(x.value, ns).attrops[x.optype]
+		return cls.build(x.value, ns).attrops[x.optype.special, x.attr.identifier]
 
 	@classmethod
 	@dispatch
@@ -1092,20 +1424,30 @@ class Signature(_SignatureBase):
 	def build(cls, x: _SignatureBase, ns):
 		return x
 
-class Function(Signature):
-	__slots__ = ('name', 'call')
+class Callable(Signature, abc.ABC):
+	__slots__ = ('call',)
+
+	@abc.abstractproperty
+	def callargssigstr(self):
+		pass
+
+class Function(Callable):
+	__slots__ = ('name',)
 
 	def __init__(self, *, name, **kwargs):
 		super().__init__(typename='function', **kwargs)
 		self.name = name
 		self.call = listmap()
 
-	def __repr__(self):
-		return f"<Function {self.name}>"
-
 	@property
 	def callargssigstr(self):
 		return '\n'.join(f"{self.name}({args})" for args, ret in self.call.items())
+
+	@staticitemget
+	def attrops(optype, attr):
+		if (optype == '.'):
+			if (attr == 'map'): return stdlib._map()
+		raise KeyError()
 
 	@classmethod
 	@dispatch
@@ -1113,12 +1455,100 @@ class Function(Signature):
 		name = x.name.identifier
 		if (name not in ns): ns.signatures[name] = cls(name=name)
 		callargssig = CallArguments(args=tuple(Signature.build(i, ns) for i in x.argdefs))
-		if (not redefine and callargssig in ns.signatures[name].call): raise SlValidationRedefinedError(x, ns.signatures[name].call[callargssig], scope=ns.scope)
+		if (not redefine and callargssig in ns.signatures[name].call): raise SlValidationRedefinedError(x.name, ns.signatures[name].call[callargssig], scope=ns.scope)
 		ns.signatures[name].call[callargssig] = Signature.build(x.type, ns)
 		return ns.signatures[name]
 
-class Object(Signature):
-	__slots__ = ('attrops',)
+class KeywordDef(Callable):
+	__slots__ = ('name',)
+
+	def __init__(self, *, name, **kwargs):
+		super().__init__(typename='keyworddef', **kwargs)
+		self.name = name
+		self.call = listmap()
+
+	@property
+	def callargssigstr(self):
+		return '\n'.join(f"{self.name}({args})" for args, ret in self.call.items())
+
+	@classmethod
+	@dispatch
+	def build(cls, x: ASTKeywordDefNode, ns, *, redefine=False):
+		name = x.name.identifier
+		if (name not in ns): ns.signatures[name] = cls(name=name)
+		callargssig = CallArguments(args=tuple(Signature.build(i, ns) for i in x.argdefs or ()))
+		if (not redefine and callargssig in ns.signatures[name].call): raise SlValidationRedefinedError(x.name, ns.signatures[name].call[callargssig], scope=ns.scope)
+		ns.signatures[name].call[callargssig] = stdlib.void
+		return ns.signatures[name]
+
+class Object(Signature): pass
+
+class Collection(Object):
+	__slots__ = ('keytype', 'valtype')
+
+	def __init__(self, *, keytype, valtype):
+		self.keytype, self.valtype = keytype, valtype
+
+	@property
+	def typename(self):
+		return self.valtype.typename
+
+	@itemget
+	@instantiate
+	def itemget(self, keysig, key):
+		if (keysig == self.keytype): return self.valtype
+		raise KeyError()
+
+class MultiCollection(Collection):
+	__slots__ = ('valtypes', 'typename')
+
+	def __init__(self, *, keytype, valtypes):
+		Object.__init__(self, typename='tuple')
+		self.keytype, self.valtypes = keytype, valtypes
+
+	@itemget
+	@instantiate
+	def itemget(self, keysig, key):
+		if (keysig == self.keytype): return self.valtypes[int(key)]
+		raise KeyError()
+
+class Class(Object, Callable):
+	__slots__ = ('name', 'scope', 'constructor')
+
+	def __init__(self, *, name, scope, **kwargs):
+		super().__init__(typename='class', **kwargs)
+		self.name, self.scope = name, scope
+		self.constructor = listmap()
+
+	def __str__(self):
+		return self.name
+
+	@property
+	def callargssigstr(self):
+		return '\n'.join(f"{self.name}({args})" for args, ret in self.call.items())
+
+	@itemget
+	def call(self, callargssig):
+		return self.constructor[callargssig]
+
+	@itemget
+	def attrops(self, optype, attr):
+		if (optype == '.'):
+			return self.scope.signatures[attr]
+		raise KeyError()
+
+	@classmethod
+	@dispatch
+	def build(cls, x: ASTClassdefNode, ns, *, redefine=False):
+		name = x.name.identifier
+		if (not redefine and name in ns): raise SlValidationRedefinedError(x.name, ns.signatures[name], scope=ns.scope)
+		else: ns.signatures[name] = cls(name=name, scope=ns.derive(x.code.name))
+		for i in x.code.nodes:
+			if (isinstance(i, ASTKeywordDefNode) and i.keyword.keyword == 'constr'):
+				callargssig = CallArguments(args=tuple(Signature.build(j, ns) for j in i.argdefs or ()))
+				if (not redefine and callargssig in ns.signatures[name].constructor): raise SlValidationRedefinedError(x.name, ns.signatures[name].constructor[callargssig], scope=ns.scope)
+				ns.signatures[name].constructor[callargssig] = ns.signatures[name]
+		return ns.signatures[name]
 
 class CallArguments:
 	__slots__ = ('args', 'starargs', 'kwargs', 'starkwargs')
@@ -1147,7 +1577,7 @@ class CallArguments:
 		return cls(args=tuple(Signature.build(i, ns) for i in x.callargs.callargs), kwargs=tuple((k, Signature.build(v, ns)) for k, v in x.callkwargs.callkwargs))
 
 class Namespace:
-	__slots__ = ('signatures', 'scope', 'values', 'refcount', 'flags', 'warnclasses')
+	__slots__ = ('signatures', 'scope', 'values', 'weak', 'refcount', 'flags', 'warnclasses')
 
 	class _Values:
 		@init_defaults
@@ -1169,7 +1599,7 @@ class Namespace:
 
 		@dispatch
 		def __getitem__(self, x: ASTIdentifierNode):
-			return self.values[x.identifier]
+			return self[x.identifier]
 
 		@dispatch
 		def __getitem__(self, x: str):
@@ -1201,44 +1631,90 @@ class Namespace:
 
 		@dispatch
 		def __delitem__(self, x: ASTIdentifierNode):
-			del self.values[x.identifier]
+			del self[x.identifier]
+
+		@dispatch
+		def __delitem__(self, x: str):
+			del self.values[x]
+
+		def get(self, x):
+			try: return self[x]
+			except (DispatchError, KeyError): return None
+
+		def items(self):
+			return self.values.items()
 
 		def copy(self):
 			return self.__class__(values=self.values.copy())
 
 	@init_defaults
-	def __init__(self, scope, *, signatures: dict, values: _Values, refcount: lambda: Sdict(int), warnclasses: paramset, **kwargs):
-		self.scope, self.signatures, self.values, self.refcount, self.warnclasses = scope, signatures, values, refcount, warnclasses
+	def __init__(self, scope, *, signatures: dict, values: _Values, weak: set, refcount: lambda: Sdict(int), warnclasses: paramset, **kwargs):
+		self.scope, self.signatures, self.values, self.weak, self.refcount, self.warnclasses = scope, signatures, values, weak, refcount, warnclasses
 		self.flags = paramset(k for k, v in kwargs.items() if v)
-		#self.derive.clear_cache()
+		#self.derive.clear_cache() # TODO FIXME (also cachedproperty)
 
 	def __repr__(self):
 		return f"<Namespace of scope '{self.scope}'>"
 
 	def __contains__(self, x):
-		return x in builtin_names or x in self.signatures
+		return (x in builtin_names or x in self.signatures)
 
 	@cachedfunction
 	def derive(self, scope):
-		return Namespace(signatures=self.signatures.copy(), values=self.values.copy(), scope=self.scope+'.'+scope)
+		return Namespace(signatures=self.signatures.copy(), values=self.values.copy(), weak=self.weak.copy(), scope=self.scope+'.'+scope)
 
-	@dispatch
-	def define(self, x: ASTIdentifierNode):
-		if (x.identifier in self): raise SlValidationRedefinedError(x, self.signatures[x.identifier], scope=self.scope)
-		self.values[x.identifier] = None
-		self.signatures[x.identifier] = None
+	#@dispatch
+	#def define(self, x: ASTIdentifierNode):
+	#	if (x.identifier in self and x.identifier not in self.weak): raise SlValidationRedefinedError(x, self.signatures[x.identifier], scope=self.scope)
+	#	self.values[x] = None
+	#	self.signatures[x.identifier] = None
+	#	self.weak.discard(x.identifier)
 
 	@dispatch
 	def define(self, x: ASTFuncdefNode):
 		return self.define(x, redefine=True)
 
+	#@dispatch
+	#def define(self, x: str, *, value=None):
+	#	assert (x not in self)
+	#	self.values[x] = value
+	#	self.signatures[x] = None
+
 	@dispatch
-	def define(self, x, redefine=False):
+	def define(self, x: lambda x: hasattr(x, 'name'), sig=None, *, redefine=False):
 		if (redefine):
 			try: del self.values[x.name]
 			except KeyError: pass
-		elif (x.name.identifier in self): raise SlValidationRedefinedError(x.name, self.signatures[x.name.identifier], scope=self.scope)
-		self.signatures[x.name.identifier] = Signature.build(x, self)
+			try: del self.signatures[x.name.identifier]
+			except KeyError: pass
+		self.define(x.name, sig if (sig is not None) else Signature.build(x, self), redefine=redefine)
+
+	@dispatch
+	def define(self, x: ASTIdentifierNode, sig, *, redefine=False):
+		if (redefine):
+			try: del self.values[x]
+			except KeyError: pass
+			try: del self.signatures[x.identifier]
+			except KeyError: pass
+		elif (x.identifier in self and x.identifier not in self.weak): raise SlValidationRedefinedError(x, self.signatures[x.identifier], scope=self.scope)
+		self.signatures[x.identifier] = sig
+		self.weak.discard(x.identifier)
+
+	@dispatch
+	def weaken(self, x: ASTIdentifierNode):
+		self.weak.add(x.identifier)
+
+	@dispatch
+	def delete(self, x: ASTIdentifierNode):
+		ok = bool()
+		try: del self.values[x]
+		except KeyError: pass
+		else: ok = True
+		try: del self.signatures[x.identifier]
+		except KeyError: pass
+		else: ok = True
+		self.weak.discard(x.identifier)
+		if (not ok): raise SlValidationNotDefinedError(x, scope=self.scope)
 
 from . import stdlib
 from .stdlib import builtin_names
@@ -1257,10 +1733,11 @@ class SlValidationError(SlValidationException):
 
 	def __str__(self):
 		l, line = lstripcount(self.line.partition('\n')[0].replace('\t', ' '), ' \t')
-		offset = (self.node.offset-l) if (self.node.offset != -1) else len(line)
+		offset = (self.node.offset-l) if (self.node.offset >= 0) else (len(line)+self.node.offset+1)
 		return (f'\033[2m(in {self.scope})\033[0m ' if (self.scope is not None) else '')+f"Validation error: {self.desc}{self.at}"+(':\n'+\
-			'  \033[1m'+line[:offset]+'\033[91m'+line[offset:]+'\033[0m\n'+\
-			'  '+' '*offset+'\033[95m^'+'~'*(self.node.length-1) if (line) else '')
+			'  \033[1m'+line[:offset]+'\033[91m'*(self.node.offset >= 0)+line[offset:]+'\033[0m\n'+\
+			'  '+' '*offset+'\033[95m^'+'~'*(self.node.length-1)+'\033[0m' if (line) else '') + \
+			(f"\n\n\033[1;95mCaused by:\033[0m\n{self.__cause__}" if (self.__cause__ is not None) else '')
 
 	@property
 	def at(self):
@@ -1280,4 +1757,4 @@ class SlValidationRedefinedError(SlValidationError):
 
 def optimize_ast(ast, ns): return ast.code.optimize(ns)
 
-# by Sdore, 2019
+# by Sdore, 2020

@@ -1,0 +1,3 @@
+main {
+	stdio.println('test')
+}

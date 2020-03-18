@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 # Slang stdlib
 
-from .ast import Signature, Function, Object
+from .ast import Signature, Function, Object, Collection, CallArguments
 from .tokens import *
 from utils import *
 
@@ -9,15 +9,25 @@ class Builtin(Signature):
 	def __init__(self):
 		pass
 
+	@classitemget
+	def attrops(cls, optype, attr):
+		if (optype == '.'):
+			try: return getattr(cls, attr)()
+			except AttributeError: raise KeyError()
+		raise KeyError()
+
 	@property
 	def __reprname__(self):
-		return type(self).mro()[1].__name__
+		return first(i.__name__ for i in self.__class__.mro() if i.__name__.startswith('Builtin'))
 
 	@property
 	def typename(self):
-		return type(self).__name__
+		return self.__class__.__name__
 
-class BuiltinFunction(Builtin, Function): pass
+class BuiltinFunction(Builtin, Function):
+	@property
+	def name(self):
+		return self.__class__.__name__
 
 class BuiltinObject(Builtin, Object): pass
 
@@ -27,84 +37,173 @@ class BuiltinType(Builtin):
 	def __init__(self, *, modifiers: paramset):
 		self.modifiers = modifiers
 
-class void(BuiltinType): pass
+	def __eq__(self, x):
+		return (super().__eq__(x) or issubclass(x.__class__, self.__class__) or issubclass(self.__class__, x.__class__))
+
+	@staticitemget
+	@instantiate
+	def operators(op, valsig=None, selftype=None):
+		if (valsig is None):
+			if (op in operators[9]): return bool  # unary `not'
+		else:
+			assert (selftype is not None)
+			if (isinstance(valsig, selftype) and op in operators[8]): return bool  # comparisons
+			if (op in operators[10]+operators[11]+operators[12]): return type(valsig)  # binary `and'. `xor', `or'
+		raise KeyError()
+
+class Any(BuiltinType):
+	def __eq__(self, x):
+		return True
+
+class void(BuiltinType):
+	@staticitemget
+	def operators(op, valsig=None):
+		raise KeyError()
 
 class bool(BuiltinType):
 	@staticitemget
 	@instantiate
 	def operators(op, valsig=None):
+		try: return BuiltinType.operators(op, valsig=valsig, selftype=bool)
+		except KeyError: pass
 		if (valsig is None):
 			if (op in map(UnaryOperator, '+-~')): return int
-			if (op in map(UnaryOperator, ('not', '!'))): return bool
+			if (op == UnaryOperator('!')): return bool
 		raise KeyError()
 
 class int(BuiltinType):
 	@staticitemget
 	@instantiate
 	def operators(op, valsig=None):
+		try: return BuiltinType.operators(op, valsig=valsig, selftype=int)
+		except KeyError: pass
 		if (valsig is None):
 			if (op in map(UnaryOperator, '+-~')): return int
-			if (op in map(UnaryOperator, ('not', '!'))): return bool
-		if (not isinstance(valsig, (int, float))): raise KeyError()
-		if (op in map(BinaryOperator, ('**', *'+-*'))): return valsig
-		if (op in map(BinaryOperator, ('//', '<<', '>>', *'&^|'))): return int
-		if (op == BinaryOperator('/')): return float
-		if (op == BinaryOperator('to')): return int
+			if (op == UnaryOperator('!')): return bool
+		if (isinstance(valsig, (int, float))):
+			if (op in map(BinaryOperator, ('**', *'+-*'))): return valsig
+			if (op in map(BinaryOperator, ('//', '<<', '>>', *'&^|'))): return int
+			if (op == BinaryOperator('/')): return float
+		if (isinstance(valsig, int)):
+			if (op == BinaryOperator('to')): return range
 		raise KeyError()
 
 class float(BuiltinType):
 	@staticitemget
 	@instantiate
 	def operators(op, valsig=None):
+		try: return BuiltinType.operators(op, valsig=valsig, selftype=float)
+		except KeyError: pass
 		if (valsig is None):
-			if (op in map(UnaryOperator, ('not', *'!+-'))): return float
-		if (not isinstance(valsig, (int, float))): raise KeyError()
-		if (op in map(BinaryOperator, ('**', *'+-*'))): return float
-		if (op == BinaryOperator('/')): return float
-		if (op == BinaryOperator('//')): return int
+			if (op in map(UnaryOperator, '+-')): return float
+			if (op == UnaryOperator('!')): return bool
+		if (isinstance(valsig, (int, float))):
+			if (op in map(BinaryOperator, ('**', *'+-*'))): return float
+			if (op == BinaryOperator('/')): return float
+			if (op == BinaryOperator('//')): return int
 		raise KeyError()
 
 class str(BuiltinType):
 	@staticitemget
 	@instantiate
 	def operators(op, valsig=None):
-		if (valsig is None): raise KeyError()
-		if (isinstance(valsig, str) and op == BinaryOperator('+')): return str
-		if (isinstance(valsig, int) and op == BinaryOperator('*')): return str
+		try: return BuiltinType.operators(op, valsig=valsig, selftype=str)
+		except KeyError: pass
+		if (valsig is not None):
+			if (isinstance(valsig, (char, str)) and op == BinaryOperator('+')): return str
+			if (isinstance(valsig, int) and op == BinaryOperator('*')): return str
 		raise KeyError()
 
 	@staticitemget
 	@instantiate
-	def itemget(keysig):
+	def itemget(keysig, key):
 		if (isinstance(keysig, int)): return char
 		raise KeyError()
+
+	class rstrip(BuiltinFunction):
+		callargssigstr = "rstrip(char)"
+
+		@staticitemget
+		@instantiate
+		def call(callargssig):
+			if (callargssig.kwargs or callargssig.starkwargs): raise KeyError()
+			return str
+
+	class count(BuiltinFunction):
+		callargssig = "count(char)"
+
+		@staticitemget
+		@instantiate
+		def call(callargssig):
+			if (callargssig.kwargs or callargssig.starkwargs): raise KeyError()
+			return int
 
 class char(BuiltinType):
 	@staticitemget
 	@instantiate
 	def operators(op, valsig=None):
-		if (valsig is None): raise KeyError()
-		if (isinstance(valsig, str) and op == BinaryOperator('+')): return str
-		if (isinstance(valsig, int) and op == BinaryOperator('*')): return str
-		if (isinstance(valsig, (char, int)) and op in map(BinaryOperator, '+-')): return char
+		try: return BuiltinType.operators(op, valsig=valsig, selftype=char)
+		except KeyError: pass
+		if (valsig is not None):
+			if (isinstance(valsig, str) and op in map(BinaryOperator, ('+', 'in'))): return str
+			if (isinstance(valsig, int) and op == BinaryOperator('*')): return str
+			if (isinstance(valsig, (char, int)) and op in map(BinaryOperator, '+-')): return char
 		raise KeyError()
 
-i8 = i16 = i32 = i64 = i128 = \
-u8 = u16 = u32 = u64 = u128 = int
-f8 = f16 = f32 = f64 = f128 = \
-uf8 = uf16 = uf32 = uf64 = uf128 = float
-# TODO: implement these types
+class i8(int): fmt = 'b'
+class u8(int): fmt = 'B'
+class i16(int): fmt = 'h'
+class u16(int): fmt = 'H'
+class i32(int): fmt = 'i'
+class u32(int): fmt = 'I'
+class i64(int): fmt = 'q'
+class u64(int): fmt = 'Q'
+#class i128(int): fmt = '
+#class u128(int): fmt = '
 
-class print(BuiltinFunction):
-	callargssigstr = "print(...)"
+#class f8(float): fmt = '
+#class f16(float): fmt = 'e'
+#class f32(float): fmt = 'f'
+#class f64(float): fmt = 'd'
+#class f128(float): fmt = '
+#uf8 = uf16 = uf32 = uf64 = uf128 = float
 
+class range(BuiltinType):
+	keytype = int
+	valtype = int
+
+	@staticitemget
+	def operators(op, valsig=None):
+		raise KeyError()
+
+class iterable(BuiltinType, Collection): pass
+
+class list(iterable):
+	keytype = int()
+	valtype = Any()
+
+class tuple(iterable):
+	keytype = int()
+	valtype = Any()
+
+class stdio(BuiltinObject):
+	class println(BuiltinFunction):
+		callargssigstr = "println(...)"
+
+		@staticitemget
+		@instantiate
+		def call(callargssig):
+			if (callargssig.kwargs or callargssig.starkwargs): raise KeyError()
+			return void
+
+class _map(BuiltinFunction):
 	@staticitemget
 	@instantiate
 	def call(callargssig):
 		if (callargssig.kwargs or callargssig.starkwargs): raise KeyError()
-		return void
+		return list
 
-builtin_names = {j.__name__: globals()[j.__name__] for i in map(operator.methodcaller('__subclasses__'), Builtin.__subclasses__()) for j in i}
-builtin_names.update({i: globals()[i] for i in (i+j for j in map(builtins.str, (8, 16, 32, 64, 128)) for i in (*'iuf', 'uf'))})
+builtin_names = {k: v for i in map(allsubclassdict, Builtin.__subclasses__()) for k, v in i.items()}
+builtin_names.update({i: globals()[i] for i in (i+j for j in map(builtins.str, (8, 16, 32, 64, 128)) for i in (*'iuf', 'uf') if i+j in globals())})
 
-# by Sdore, 2019
+# by Sdore, 2020

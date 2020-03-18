@@ -18,10 +18,8 @@ auto g(str x) {  # g() is of type char, x is of type str
 
 int h(int x) = x+1  # h() is of type int, x is of type int
 
-void main() {
-	print(h(n), \
+main {
+	stdio.println(h(n), \  # comment here too
 		f('123asd') + g('32') + 1)  #--> «123124 f»
-	print(q/z/2**96)  #--> «4294967296.0»
+	stdio.println(q/z/2**96)  #--> «4294967296.0»
 }
-
-main()

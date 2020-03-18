@@ -1,1 +1,14 @@
-- arrays
+- doc `import [[<namespace>:][<path>/]<pkg>:]<name>`
+- allow `?` modifier only if ≥2 args ?
+- https://esolangs.org/wiki/Stlang
+- https://esolangs.org/wiki/Object_disoriented
+- https://esolangs.org/wiki/Funciton ?
+- `O.each { code }` (i.e. `O.each({code})`)
+- Proposal: `if`, `for` and `while` without brackets
+- OOP
+- Increments
+- FIXME: whitespace in srclength
+- renew all `__repr__`s *AND* `__str__`s
+- Proposal: `f(kw: arg)` = `f(kw=arg)`
+- Proposal: [https://docs.microsoft.com/ru-ru/dotnet/csharp/language-reference/operators/default]
+- FIXME: `auto' rettype

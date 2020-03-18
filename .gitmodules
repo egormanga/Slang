@@ -1,0 +1,3 @@
+[submodule "compilers/pyssembly/typeshed"]
+	path = compilers/pyssembly/typeshed
+	url = https://github.com/python/typeshed.git
