@@ -1,3 +1,5 @@
+#| Slang `redefine' test. |#
+
 main {
 	int a
 	a = 3

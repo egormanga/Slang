@@ -14,4 +14,5 @@ main {
 	stdio.println("\n")
 }
 
-# by Sdore, 2020
+# by Sdore, 2021
+# slang.sdore.me

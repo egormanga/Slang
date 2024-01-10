@@ -3,7 +3,7 @@
 # https://esolangs.org/wiki/Gibberish_(programming_language)
 
 from .. import *
-from Slang.ast import *
+from ...ast import *
 from utils import *
 
 class Instrs:
@@ -132,4 +132,6 @@ class GibberishCompiler(Compiler):
 		dlog("Code:\n"+code.decode())
 		return code
 
-# by Sdore, 2019
+compiler = GibberishCompiler
+
+# by Sdore, 2020

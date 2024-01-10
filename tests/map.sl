@@ -1,3 +1,5 @@
+#| Slang `map' test. |#
+
 void f(int x) = stdio.println(x)
 
 main {

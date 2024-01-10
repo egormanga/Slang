@@ -38,7 +38,7 @@ class Instrs:
 	def _class_init(self, *args, **kwargs):
 		getattr(self, '<init>')()
 		getattr(self, f"<constructor ({', '.join(type(i).__name__ for i in (*args, *kwargs.values()))})>")(*args, **kwargs)
-	_class_init = _class_init.__code__.replace(co_name='<new>')
+	_class_init = code_with(_class_init.__code__, co_name='<new>')
 
 	@init_defaults
 	def __init__(self, *, name, ns, filename, argdefs=(), lastnodens: lambda: [None, None], firstlineno=0):
@@ -52,7 +52,7 @@ class Instrs:
 		self.cellvars = self.argnames.copy()
 		self.srclnotab = list()
 		self.lastln = self.firstlineno
-		self._class_init = self._class_init.replace(co_filename=self.filename, co_consts=tuple(i.replace(co_filename=self.filename) if (isinstance(i, CodeType)) else i for i in self._class_init.co_consts))
+		self._class_init = code_with(self._class_init, co_filename=self.filename, co_consts=tuple(code_with(i, co_filename=self.filename) if (isinstance(i, CodeType)) else i for i in self._class_init.co_consts))
 
 	def compile(self):
 		return pyssembly.Code('\n'.join(self.instrs), name=self.name, filename=self.filename.strip('"'), srclnotab=self.srclnotab, firstlineno=self.firstlineno, consts=self.consts, argnames=self.argnames)
@@ -146,7 +146,7 @@ class Instrs:
 	@dispatch
 	def add(self, x: ASTFuncdefNode):
 		code_ns = self.ns.derive(x.name.identifier)
-		name = f"{x.name.identifier}({CallArguments(args=tuple(Signature.build(i, code_ns) for i in x.argdefs))})"
+		name = f"{x.name.identifier}({CallArguments(args=x.argdefs, ns=code_ns)})"
 		self.lastnodens[1] = code_ns
 		fname = f"{self.name}.<{x.__fsig__()}>"
 		f_instrs = Instrs(name=fname, ns=code_ns, filename=self.filename, argdefs=x.argdefs, lastnodens=self.lastnodens, firstlineno=x.lineno)
@@ -214,8 +214,9 @@ class Instrs:
 				src = open(filename, 'r').read()
 				tl = parse_string(src)
 				ast = build_ast(tl, filename)
-				optimize_ast(ast, validate_ast(ast))
-				instrs = Instrs(name='<module>', ns=validate_ast(ast), filename=filename)
+				if (x.flags.optimized): optimize_ast(ast, validate_ast(ast))
+				ns = validate_ast(ast)
+				instrs = Instrs(name=filename, ns=ns, filename=filename)
 				instrs.add(ast)
 				code = instrs.compile().to_code()
 				# TODO
@@ -359,36 +360,54 @@ class Instrs:
 
 	@dispatch
 	def load(self, x: ASTFunccallNode):
-		if (isinstance(x.callable, ASTValueNode) and isinstance(x.callable.value, ASTIdentifierNode) and x.callable.value.identifier in self.ns.signatures and not isinstance(self.ns.signatures[x.callable.value.identifier], Class)):
-			self.load(f"{x.callable.value.identifier}({CallArguments.build(x, self.ns)})")
-		else: self.load(x.callable)
+		#if (isinstance(x.callable, ASTValueNode) and isinstance(x.callable.value, ASTIdentifierNode) and x.callable.value.identifier in self.ns.signatures and not isinstance(self.ns.signatures[x.callable.value.identifier], Class)):
+		callarguments = CallArguments.build(x, self.ns)
+		fsig = Signature.build(x.callable, self.ns)
+		fcall = fsig.compatible_call(callarguments, self.ns)
+		if (fcall is None): raise TODO(fcall)
 		n = int()
+		if (fcall[0] is not None): self.load(f"{fsig.name}({CallArguments(args=fcall[0], ns=self.ns)})")
+		else:
+			if (isinstance(x.callable.value, ASTAttrgetNode)):
+				ofsig = Signature.build(x.callable.value.value, self.ns)
+				if (type(ofsig) is Function):
+					ofcall = ofsig.compatible_call(callarguments, self.ns)
+					assert (ofcall is not None)
+					self.load(fsig.name)
+					self.load(f"{ofsig.name}({CallArguments(args=ofcall[0], ns=self.ns)})")
+					n += 1
+				elif (type(ofsig) is stdlib.list):
+					f = ofsig.attrops[x.callable.value.optype.special, x.callable.value.attr.identifier]
+					self.load(f.name)
+					self.load(x.callable.value.value)
+					n += 1
+				elif (isinstance(fsig, stdlib.Builtin)):
+					self.load(x.callable)
+				else: raise NotImplementedError(ofsig)
+			else: raise NotImplementedError(x.callable.value)
 
 		for i in x.callargs.callargs:
 			self.load(i)
 			n += 1
 		if (x.callargs.starargs):
-			if (n):
-				self.instrs.append(f"BUILD_TUPLE	{n}")
-				n = 1
+			if (n or len(x.callargs.starargs) > 1): self.instrs.append(f"BUILD_LIST	{n}")
 			for i in x.callargs.starargs:
 				self.load(i)
-				n += 1
-			self.instrs.append(f"BUILD_TUPLE_UNPACK_WITH_CALL	{n}")
+				if (n or len(x.callargs.starargs) > 1): self.instrs.append("LIST_EXTEND	1")
+			if (n or len(x.callargs.starargs) > 1): self.instrs.append("LIST_TO_TUPLE")
 			n = 0
-
+		elif (x.callkwargs.starkwargs):
+			self.instrs.append("BUILD_TUPLE	{n}")
+			n = 0
 		for i in x.callkwargs.callkwargs:
 			self.load(f"'{i[0]}'")
 			self.load(i[1])
 			n += 1
-		if (n and (x.callargs.starargs or x.callkwargs.starkwargs)):
-			self.instrs.append(f"BUILD_MAP	{n}")
-			n = 1
 		if (x.callkwargs.starkwargs):
+			self.instrs.append(f"BUILD_MAP	{n}")
 			for i in x.callkwargs.starkwargs:
 				self.load(i)
-				n += 1
-			self.instrs.append(f"BUILD_MAP_UNPACK_WITH_CALL	{n}")
+				self.instrs.append("DICT_MERGE	1")
 			n = 1
 
 		self.instrs.append(f"CALL{'EX' if (x.callargs.starargs or x.callkwargs.starkwargs) else 'KW' if (x.callkwargs.callkwargs) else ''}	{n}")
@@ -453,18 +472,18 @@ class PyssemblyCompiler(Compiler):
 
 	@classmethod
 	def compile_ast(cls, ast, ns, *, filename):
-		instrs = Instrs(name='<module>', ns=ns, filename=filename)
+		instrs = Instrs(name=filename, ns=ns, filename=filename)
 
-		instrs.consts.append(compile(open(std.__file__).read(), '<std>', 'exec'))
+		instrs.consts.append(code_with(compile(open(std.__file__).read(), '<stdlib>', 'exec'), name='stdlib'))
 		instrs.instrs += [
 			f"LOAD	{len(instrs.consts)-1}",
-			"LOAD	('<std>')",
+			"LOAD	('<stdlib>')",
 			"MKFUNC	0", # TODO?
 			"CALL",
 		]
 
 		try: instrs.add(ast)
-		except Exception as ex: raise SlCompilationError('Compilation error', instrs.lastnodens[0], scope=instrs.lastnodens[1].scope) from ex
+		except Exception as ex: raise SlCompilationError('Compilation error', instrs.lastnodens[0], scope=instrs.lastnodens[1].scope if (instrs.lastnodens[1] is not None) else '<UNKNOWN>') from ex
 
 		#dlog("Instrs:\n"+'\n'.join(instrs.instrs)+'\n')
 
@@ -482,5 +501,7 @@ class PyssemblyCompiler(Compiler):
 			raise SlCompilationError('Pyssembly error', ast, scope=instrs.ns) from ex
 
 		return code
+
+compiler = PyssemblyCompiler
 
 # by Sdore, 2020

@@ -19,13 +19,14 @@ class int {
 	int operator *int;
 	int operator //int;
 	int operator **int;
+	int operator %int;
 	int operator <<int;
 	int operator >>int;
 	int operator &int;
 	int operator ^int;
 	int operator |int;
 
-	range operator to int;
+	range operator 'to' int;
 
 	int popcount();
 	int length(int base=2);
@@ -42,6 +43,7 @@ class float {
 	float operator /float;
 	int operator //float;
 	float operator **float;
+	float operator %float;
 
 	int round();
 	bool isint();

@@ -1,4 +1,4 @@
-# Slang 
+# Slang
 <!-- <font size=0>(June, 30 12:04 AM draft)</font> -->
 
 ### Example code
@@ -8,26 +8,26 @@
 #| and that is a
 	multiline one. |#
 
-const u32 n = 123123  # n is of type const u32
-const i64 m = 10**18  # m is of type const i64
-const int z = 2**128  # z is of type const int (unsized)
-const auto q = 2**256  # q is of type const int
+const u32 n = 123123   # n: const u32 (unsigned 32 bit)
+const i64 m = 10**18   # m: const i64 (signed 64 bit)
+const int z = 2**128   # z: const int (signed unsized)
+const auto q = 2**256  # q: const int (signed unsized)
 
-char f(str x) {  # f() is of type char, x is of type str
-	auto c = x[1]  # c is of type char
-	return c
+char f(str x) {        # f(): char, x: str
+    auto c = x[1]      # c: char
+    return c           # char
 }
 
-auto g(str x) {  # g() is of type char, x is of type str
-	return x[0]  # retval is of type char
+auto g(str x) {        # g(): char, x: str
+    return x[0]        # char
 }
 
-int h(int x) = x+1  # h() is of type int, x is of type int
+int h(int x) = x+1     # h(): int, x: int
 
 main {
-	stdio.println(h(n), \  # comment here too
-		f('123asd') + g('32') + 1)  #--> «123124 f»
-	stdio.println(q/z/2**96)  #--> «4294967296.0»
+    stdio.println(h(n), \  # comments allowed here too
+        f('123asd') + g('32') + 1)      #--> «123124 f»
+    stdio.println(q/z/2**96)            #--> «4294967296.0»
 }
 ```
 
@@ -58,8 +58,7 @@ _Note: `*` after syntax unit means any number of them._
 
 ### Primitive
 
-* `<<literal> | <funccall> | <attrget> | <itemget> | <identifier> | <lambda>>` — `value`
-* `<value>\[<value>\]` — `itemget`
+* `<<funccall> | <itemget> | <attrget> | <identifier> | <lambda> | <literal>>` — `value`
 * `<(<expr>) | <value> | <operator> <expr> | <expr> <operator> <expr>>` — `expr` (`f(x+3)` is an instance of `expr`, also `f`, `x+3` and `x` are `expr`s too)
 
 ### Non-final
@@ -73,15 +72,17 @@ _Note: `*` after syntax unit means any number of them._
  > `=` — default value if argument not specified.
 * `([<argdef>[, <argdef>]*]) -> <typedef> = <expr>` — `lambda` (lambda function)
 * `<<expr>[, <expr>]*[, *<expr>] | *<expr>>` — `callargs`
-* `<<identifier>=<expr>[, <identifier>=<expr>]*[, **<expr>] | **<expr>>` — `callkwargs`
+* `<<identifier> =|: <expr>[, <identifier> =|: <expr>]*[, **<expr>] | **<expr>>` — `callkwargs`
+* `<value>\[<expr>\]` — `itemget`
+* `<value>.<identifier>` — `attrget`
 
 ### Final (ordered by resolution order)
 
 * `<typedef> <identifier>([<argdef>[, <argdef>]*]) <<code> | = <expr>>` — `funcdef` (function definition)
 * `<exprkeyword> [expr]` — `keywordexpr` (keyword expression)
-* `<typedef> <identifier> [= <value>]` — `vardef` (variable definition)
-* `<identifier> = <value>` — `assignment`
-* `<identifier>[, <identifier>]* = <value>` — `unpackassignment`
+* `<typedef> <identifier> [= <expr>]` — `vardef` (variable definition)
+* `<identifier> = <expr>` — `assignment`
+* `<identifier>[, <identifier>]* = <expr>` — `unpackassignment`
 * `<value>([<callargs> | <callkwargs> | <callargs>, <callkwargs>])` — `funccall` (function call)
 * `<expr>` — expr evaluation (only in REPL)
 * `if (<expr>) <block>` — `conditional`
@@ -100,12 +101,22 @@ _Note: `*` after syntax unit means any number of them._
 ### Reserved keywords
 
 * `def`
+* `try`
+* `catch`
+* `except`
+* `finally`
+* `raise`
+* `with`
+* `yield`
+* `include`
+* `using`
+* `default`
 
 ## Identifiers
 
 Non-empty sequence of alphanumeric characters plus underscore («_»), not starting with a digit character.
 
-Regex: `[_\w][_\w\d]*`
+Regex: `[^\W\d][\w]*`
 
 ### Data types
 
@@ -113,10 +124,14 @@ Regex: `[_\w][_\w\d]*`
 * `u8`, `u16`, `u32`, `u64`, `u128` — fixed size unsigned integer
 * `f8`, `f16`, `f32`, `f64`, `f128` — fixed size IEEE-754 floating point number
 * `uf8`, `uf16`, `uf32`, `uf64`, `uf128` — fixed size unsigned floating point number
+* `c8`, `c16`, `c32`, `c64`, `c128` — fixed size complex number
+* `uc8`, `uc16`, `uc32`, `uc64`, `uc128` — fixed size unsigned complex number
 * `int` — unsized («big») integer
 * `uint` — unsized unsigned integer
 * `float` — unsized floating point number
 * `ufloat` — unsized unsigned floating point
+* `complex` — unsized complex number
+* `ucomplex` — unsized unsigned complex number
 * `bool` — logical (boolean) value
 * `byte` — single byte
 * `char` — UTF-8 character
@@ -171,5 +186,9 @@ A set of pre-defined keyword operators:
 
 All character class checks are performed in current locale.
 
+
+<br>
+
 ---
-_by Sdore, 2020_
+_by Sdore, 2021-22_<br>
+_slang.sdore.me_

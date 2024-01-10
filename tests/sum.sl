@@ -1,4 +1,6 @@
-i8 a = 3
-i8 b = 5
-i8 c = a+b
+#| Slang `sum' test. |#
+
+i64 a = 97
+i64 b = 5
+i64 c = a+b
 stdio.println(c)

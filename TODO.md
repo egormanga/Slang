@@ -3,12 +3,16 @@
 - https://esolangs.org/wiki/Stlang
 - https://esolangs.org/wiki/Object_disoriented
 - https://esolangs.org/wiki/Funciton ?
-- `O.each { code }` (i.e. `O.each({code})`)
-- Proposal: `if`, `for` and `while` without brackets
+- Proposal: `if`, `for` and `while` without `()`
 - OOP
 - Increments
-- FIXME: whitespace in srclength
-- renew all `__repr__`s *AND* `__str__`s
 - Proposal: `f(kw: arg)` = `f(kw=arg)`
 - Proposal: [https://docs.microsoft.com/ru-ru/dotnet/csharp/language-reference/operators/default]
-- FIXME: `auto' rettype
+- FIXME: https://docs.python.org/3/reference/expressions.html#the-power-operator
+- Proposal: `lazy` modifier and `lazy: expr` -- expr that evaluates/runs on first request after declaration
+- time literal
+- Proposal: arbitrary size numeric data types
+- Proposal: single argument lambda without `()`
+- https://lucidchart.com/techblog/2015/08/31/the-worst-mistake-of-computer-science
+- ${lang} as logo ?
+- Inheritance as in Ruby: `class A < B { }`

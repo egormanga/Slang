@@ -1,8 +1,3 @@
-old.c
-**.db
-**.log
-**.pyc
-**.old
-**.bak
-**__pycache__
-**_config.py
+*.old
+*.bak
+__pycache__/
