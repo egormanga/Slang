@@ -16,3 +16,4 @@
 - https://lucidchart.com/techblog/2015/08/31/the-worst-mistake-of-computer-science
 - ${lang} as logo ?
 - Inheritance as in Ruby: `class A < B { }`
+- `for`-`finally`-`else`
